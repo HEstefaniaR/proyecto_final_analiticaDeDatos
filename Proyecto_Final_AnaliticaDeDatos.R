@@ -435,6 +435,6 @@ cat("Acumulados tratados:", nrow(trazabilidad_M), "\n")
 cat("Casos aislados conservados:", nrow(acumulados_pendientes_M), "\n")
 cat("Ceros modificados:", ceros_antes - ceros_despues, "\n")
 
-# Tablas de trazabilidad de M
+# Tablas de trazabilidad
 print(trazabilidad_M, n = Inf)
 print(acumulados_pendientes_M, n = Inf)
