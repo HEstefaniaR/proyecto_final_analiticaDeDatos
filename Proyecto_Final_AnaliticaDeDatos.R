@@ -20,7 +20,7 @@ set.seed(2026)
 
 ## DIRECTORIO DE TRABAJO
 rm(list=ls())
-setwd("C:/Users/maria/Downloads/proyecto_final_analiticaDeDatos")
+setwd("C:/Users/yenpa/Desktop/analitica 3/proyecto_final_analiticaDeDatos")
 dir.create("Figuras", showWarnings = FALSE)
 
 ##### CARGA DE DATOS: precipitacion satelite y tierra
@@ -435,6 +435,133 @@ cat("Acumulados tratados:", nrow(trazabilidad_M), "\n")
 cat("Casos aislados conservados:", nrow(acumulados_pendientes_M), "\n")
 cat("Ceros modificados:", ceros_antes - ceros_despues, "\n")
 
-# Tablas de trazabilidad
+# Tablas de trazabilidad de M
 print(trazabilidad_M, n = Inf)
 print(acumulados_pendientes_M, n = Inf)
+
+####################################################
+# Dias faltantes y años incompletos (1981-2003)
+####################################################
+
+# Construir calendario completo por estacion-anio
+datos_N <- p_m_depurado %>%
+  select(STATION_ID, YEAR, fecha, VALUE) %>%
+  arrange(STATION_ID, fecha)
+
+stopifnot(nrow(datos_N) == nrow(distinct(datos_N, STATION_ID, fecha)),
+          !any(is.na(datos_N$fecha)))
+
+fechas_N <- tibble(fecha = seq(as.Date("1981-01-01"), as.Date("2003-12-31"), by = "day"),
+                   YEAR = as.integer(format(fecha, "%Y")))
+
+calendario_N <- datos_N %>%
+  distinct(STATION_ID, YEAR) %>%
+  inner_join(fechas_N, by = "YEAR", relationship = "many-to-many") %>%
+  left_join(datos_N %>% mutate(registrado = TRUE) %>%
+              select(STATION_ID, fecha, VALUE, registrado),
+            by = c("STATION_ID", "fecha")) %>%
+  arrange(STATION_ID, YEAR, fecha) %>%
+  mutate(fecha_ausente = is.na(registrado),
+         valor_na = !fecha_ausente & is.na(VALUE),
+         valido = !is.na(VALUE)) %>%
+  select(STATION_ID, YEAR, fecha, VALUE, fecha_ausente, valor_na, valido)
+
+# Calcular cobertura, rachas de faltantes y ausencias en los extremos
+racha_max <- function(v) {
+  r <- rle(!v)
+  if (any(r$values)) max(r$lengths[r$values]) else 0
+}
+
+borde_max <- function(v) {
+  f <- !v
+  max(sum(cumprod(f)), sum(cumprod(rev(f))))
+}
+
+cobertura_N <- calendario_N %>%
+  group_by(STATION_ID, YEAR) %>%
+  summarise(dias_esperados = n(),
+            dias_validos = sum(valido),
+            fechas_ausentes = sum(fecha_ausente),
+            valores_na = sum(valor_na),
+            max_hueco = racha_max(valido),
+            max_borde = borde_max(valido),
+            .groups = "drop") %>%
+  mutate(dias_faltantes = fechas_ausentes + valores_na,
+         cobertura = dias_validos / dias_esperados,
+         cobertura_pct = round(100 * cobertura, 2)) %>%
+  arrange(STATION_ID, YEAR)
+
+stopifnot(all(cobertura_N$dias_validos + cobertura_N$dias_faltantes ==
+                cobertura_N$dias_esperados))
+
+# Resumen general de completitud
+resumen_N <- cobertura_N %>%
+  summarise(estaciones = n_distinct(STATION_ID),
+            pares_estacion_anio = n(),
+            dias_esperados = sum(dias_esperados),
+            dias_validos = sum(dias_validos),
+            fechas_ausentes = sum(fechas_ausentes),
+            valores_na = sum(valores_na),
+            pares_completos = sum(cobertura == 1))
+
+print(resumen_N)
+summary(cobertura_N[, c("cobertura_pct", "max_hueco", "max_borde")])
+
+# Diagnosticar patrones en anios con cobertura inferior al 90 %
+diagnostico_N <- datos_N %>%
+  filter(!is.na(VALUE)) %>%
+  semi_join(cobertura_N %>% filter(cobertura < 0.90),
+            by = c("STATION_ID", "YEAR")) %>%
+  group_by(STATION_ID, YEAR) %>%
+  arrange(fecha, .by_group = TRUE) %>%
+  summarise(primera_fecha = min(fecha),
+            ultima_fecha = max(fecha),
+            meses_observados = n_distinct(format(fecha, "%m")),
+            intervalo_tipico = if (n() > 1) median(as.numeric(diff(fecha))) else NA_real_,
+            .groups = "drop") %>%
+  left_join(cobertura_N %>%
+              select(STATION_ID, YEAR, dias_validos, cobertura_pct, max_hueco, max_borde),
+            by = c("STATION_ID", "YEAR")) %>%
+  mutate(patron = case_when(
+    meses_observados == 1 ~ "Registros en un solo mes",
+    between(intervalo_tipico, 25, 35) ~ "Posible frecuencia mensual",
+    between(intervalo_tipico, 5, 9) ~ "Posible frecuencia semanal",
+    max_borde >= 30 ~ "Periodo prolongado sin registros",
+    TRUE ~ "Faltantes dispersos u otro patron"
+  )) %>%
+  arrange(cobertura_pct)
+
+print(diagnostico_N %>% count(patron, name = "pares"))
+print(head(diagnostico_N, 20))
+
+# Comparar umbrales en el periodo provisional de entrenamiento (1981-1995)
+datos_train_N <- cobertura_N %>% filter(between(YEAR, 1981, 1995))
+
+comparacion_umbrales_N <- tibble(umbral = c(0.85, 0.90, 0.95)) %>%
+  mutate(pares_solo_cobertura = sapply(umbral, function(u)
+    sum(datos_train_N$cobertura >= u)),
+    pares_aptos = sapply(umbral, function(u)
+      sum(datos_train_N$cobertura >= u & datos_train_N$max_hueco <= 7 &
+            datos_train_N$max_borde <= 7)),
+    estaciones_aptas = sapply(umbral, function(u)
+      n_distinct(datos_train_N$STATION_ID[datos_train_N$cobertura >= u &
+                                            datos_train_N$max_hueco <= 7 & datos_train_N$max_borde <= 7])))
+
+print(comparacion_umbrales_N)
+
+# Seleccionar pares aptos para construir curvas funcionales
+cobertura_N <- cobertura_N %>%
+  mutate(apto = cobertura >= 0.95 & max_hueco <= 7 & max_borde <= 7)
+
+comparacion_N <- cobertura_N %>%
+  summarise(pares_antes = n(),
+            pares_aptos = sum(apto),
+            pares_excluidos = sum(!apto),
+            estaciones_antes = n_distinct(STATION_ID),
+            estaciones_despues = n_distinct(STATION_ID[apto]))
+
+print(comparacion_N)
+
+pares_validos_N <- cobertura_N %>% filter(apto) %>% select(STATION_ID, YEAR)
+p_n_depurado <- p_m_depurado %>%
+  semi_join(pares_validos_N, by = c("STATION_ID", "YEAR"))
