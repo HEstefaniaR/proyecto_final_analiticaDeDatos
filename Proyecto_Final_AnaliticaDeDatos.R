@@ -20,7 +20,7 @@ set.seed(2026)
 
 ## DIRECTORIO DE TRABAJO
 rm(list=ls())
-setwd("C:/Users/yenpa/Desktop/analitica 3/proyecto_final_analiticaDeDatos")
+setwd("C:/Users/maria/Downloads/proyecto_final_analiticaDeDatos")
 dir.create("Figuras", showWarnings = FALSE)
 
 ##### CARGA DE DATOS: precipitacion satelite y tierra
@@ -110,9 +110,6 @@ length(unique(p_tierra$STATION_ID[error]))
 p_tierra$VALUE[error] <- NA
 
 sum(p_tierra$VALUE > 300, na.rm = TRUE)
-
-
-
 ####################################################
 # ACUMULADOS MENSUALES Y CEROS FALSOS
 ####################################################
@@ -229,11 +226,12 @@ patrones_mensuales <- mensuales_M %>%
 
 print(patrones_mensuales, n = 30)
 
-# Casos con al menos 3 meses de este tipo
-alta_sospecha_M <- patrones_mensuales %>%
-  filter(meses_con_un_registro >= 3)
 
-cat("Pares estacion-anio con patron repetido:", nrow(alta_sospecha_M), "\n")
+# Considerar todos los meses con un unico registro al final
+alta_sospecha_M <- patrones_mensuales %>%
+  filter(meses_con_un_registro >= 1)
+
+cat("Pares estacion-anio con registro unico al final:", nrow(alta_sospecha_M), "\n")
 
 print(alta_sospecha_M, n = 30)
 
@@ -258,7 +256,7 @@ auditoria_acumulados_M <- p_m %>%
   filter(fin_mes, !is.na(VALUE)) %>%
   transmute(STATION_ID, YEAR, MONTH, fecha,
             valor_original = VALUE,
-            motivo = "Registro unico a fin de mes con patron repetido",
+            motivo = "Unico registro del mes ubicado en el ultimo dia",
             # Se excluye de la serie DIARIA solo si se confirma que es un total mensual
             decision = "Propuesta: excluir como dato diario") %>%
   arrange(STATION_ID, fecha)
@@ -364,22 +362,164 @@ comparacion_historica_M <- diagnostico_ceros_M %>%
 print(comparacion_historica_M, n = Inf)
 
 
+# Comparacion historica de los 11 meses con ceros sospechosos
+comparacion_ceros_historica_M <- resumen_mensual %>%
+  semi_join(diagnostico_ceros_M, by = c("STATION_ID", "MONTH")) %>%
+  filter(n_registros >= 25, n_validos >= 25, between(YEAR, 1981, 1995)) %>%
+  mutate(pct_ceros = 100 * n_ceros / n_validos,
+         pct_lluvia = 100 * n_positivos / n_validos) %>%
+  inner_join(diagnostico_ceros_M %>%
+               transmute(STATION_ID, MONTH, anio_sospechoso = YEAR,
+                         ceros_sospechosos = n_ceros,
+                         lluvia_fin_mes = valor_fin_mes),
+             by = c("STATION_ID", "MONTH")) %>%
+  filter(YEAR != anio_sospechoso) %>%
+  group_by(STATION_ID, MONTH, anio_sospechoso, ceros_sospechosos, lluvia_fin_mes) %>%
+  summarise(anios_historicos = n(),
+            mediana_ceros = median(n_ceros),
+            max_ceros_historicos = max(n_ceros),
+            mediana_pct_ceros = round(median(pct_ceros), 1),
+            mediana_dias_lluvia = median(n_positivos),
+            .groups = "drop") %>%
+  arrange(STATION_ID, anio_sospechoso)
+
+print(comparacion_ceros_historica_M, n = Inf)
+
+
+# Comparar los 11 meses sospechosos con otras estaciones
+# y con el historico de esas estaciones (1981-1995)
+
+meses_sospechosos_M <- diagnostico_ceros_M %>%
+  transmute(STATION_ID, YEAR, MONTH,
+            ceros_sospechosos = n_ceros,
+            lluvia_fin_mes = valor_fin_mes,
+            pct_ceros_sospechosos = round(100 * n_ceros / n_registros, 1))
+
+referencia_estaciones_M <- resumen_mensual %>%
+  filter(n_registros >= 25, n_validos >= 25) %>%
+  anti_join(diagnostico_ceros_M, by = c("STATION_ID", "YEAR", "MONTH")) %>%
+  mutate(pct_ceros = 100 * n_ceros / n_validos)
+
+comparacion_otras_estaciones_M <- meses_sospechosos_M %>%
+  rowwise() %>%
+  mutate(
+    otras_estaciones_mismo_anio = n_distinct(
+      referencia_estaciones_M$STATION_ID[
+        referencia_estaciones_M$YEAR == YEAR &
+          referencia_estaciones_M$MONTH == MONTH &
+          referencia_estaciones_M$STATION_ID != STATION_ID
+      ]),
+    mediana_ceros_mismo_anio = median(
+      referencia_estaciones_M$pct_ceros[
+        referencia_estaciones_M$YEAR == YEAR &
+          referencia_estaciones_M$MONTH == MONTH &
+          referencia_estaciones_M$STATION_ID != STATION_ID
+      ], na.rm = TRUE),
+    mediana_ceros_historica_otras = median(
+      referencia_estaciones_M$pct_ceros[
+        between(referencia_estaciones_M$YEAR, 1981, 1995) &
+          referencia_estaciones_M$YEAR != YEAR &
+          referencia_estaciones_M$MONTH == MONTH &
+          referencia_estaciones_M$STATION_ID != STATION_ID
+      ], na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(diferencia_mismo_anio = round(
+    pct_ceros_sospechosos - mediana_ceros_mismo_anio, 1),
+    diferencia_historica = round(
+      pct_ceros_sospechosos - mediana_ceros_historica_otras, 1)) %>%
+  arrange(desc(diferencia_mismo_anio))
+
+print(comparacion_otras_estaciones_M, n = Inf, width = Inf)
+
+# Historico de lluvia concentrada al final del mes
+historico_picos_M <- diagnostico_ceros_M %>%
+  transmute(STATION_ID, MONTH, anio_sospechoso = YEAR) %>%
+  left_join(resumen_mensual %>%
+              filter(between(YEAR, 1981, 1995),
+                     n_registros >= 25, n_validos >= 25) %>%
+              transmute(STATION_ID, MONTH, anio_historico = YEAR,
+                        pico_final = !is.na(proporcion_fin_mes) &
+                          proporcion_fin_mes >= 0.80,
+                        unica_lluvia_final = n_positivos == 1 &
+                          !is.na(valor_fin_mes) & valor_fin_mes > 0),
+            by = c("STATION_ID", "MONTH"),
+            relationship = "many-to-many") %>%
+  filter(is.na(anio_historico) | anio_historico != anio_sospechoso) %>%
+  group_by(STATION_ID, MONTH, anio_sospechoso) %>%
+  summarise(anios_historicos = sum(!is.na(anio_historico)),
+            veces_pico_final = sum(pico_final, na.rm = TRUE),
+            veces_unica_lluvia_final = sum(unica_lluvia_final, na.rm = TRUE),
+            .groups = "drop")
+
+print(historico_picos_M, n = Inf, width = Inf)
+
+# Detectar meses completos con precipitacion igual a cero
+resumen_ceros_completos_M <- resumen_mensual %>%
+  mutate(inicio_mes = as.Date(sprintf("%04d-%02d-01", YEAR, MONTH)),
+         siguiente_mes = as.Date(format(inicio_mes + 32, "%Y-%m-01")),
+         dias_mes = as.integer(siguiente_mes - inicio_mes),
+         pct_ceros = 100 * n_ceros / n_validos)
+
+meses_todo_cero_M <- resumen_ceros_completos_M %>%
+  filter(n_registros == dias_mes,
+         n_validos == dias_mes,
+         n_ceros == dias_mes) %>%
+  select(STATION_ID, YEAR, MONTH, dias_mes, n_ceros)
+
+# Comparar con otros años de la misma estacion
+historico_todo_cero_M <- meses_todo_cero_M %>%
+  rename(anio_sospechoso = YEAR) %>%
+  left_join(resumen_ceros_completos_M %>%
+              filter(between(YEAR, 1981, 1995), n_validos >= 25) %>%
+              transmute(STATION_ID, MONTH, anio_historico = YEAR,
+                        pct_ceros_historico = pct_ceros),
+            by = c("STATION_ID", "MONTH"),
+            relationship = "many-to-many") %>%
+  filter(is.na(anio_historico) | anio_historico != anio_sospechoso) %>%
+  group_by(STATION_ID, anio_sospechoso, MONTH, dias_mes) %>%
+  summarise(anios_historicos = sum(!is.na(anio_historico)),
+            mediana_historica = if (all(is.na(pct_ceros_historico)))
+              NA_real_ else median(pct_ceros_historico, na.rm = TRUE),
+            .groups = "drop")
+
+# Comparar con otras estaciones en el mismo mes y año
+referencia_regional_M <- resumen_ceros_completos_M %>%
+  filter(n_validos >= 25) %>%
+  group_by(YEAR, MONTH) %>%
+  summarise(mediana_regional = median(pct_ceros, na.rm = TRUE),
+            estaciones_referencia = n_distinct(STATION_ID),
+            .groups = "drop")
+
+comparacion_todo_cero_M <- historico_todo_cero_M %>%
+  left_join(referencia_regional_M,
+            by = c("anio_sospechoso" = "YEAR", "MONTH")) %>%
+  mutate(diferencia_historica = round(100 - mediana_historica, 1),
+         diferencia_regional = round(100 - mediana_regional, 1)) %>%
+  arrange(desc(diferencia_regional))
+
+cat("Meses completos con todos los valores en cero:",
+    nrow(meses_todo_cero_M), "\n")
+
+print(head(comparacion_todo_cero_M, 30), width = Inf)
+
+
 # Limpieza final y trazabilidad
 p_m_depurado <- p_m
 
-# Los 26 registros de patron mensual repetido
+# Los 36 registros con unica observacion al final del mes
 acumulados_tratar_M <- auditoria_acumulados_M %>%
   select(STATION_ID, fecha, valor_original, motivo) %>%
   distinct(STATION_ID, fecha, .keep_all = TRUE)
 
 # Verificar que los registros coincidan con la base
-stopifnot(nrow(acumulados_tratar_M) == 26)
+stopifnot(nrow(acumulados_tratar_M) == 36)
 
 verificacion_M <- acumulados_tratar_M %>%
   left_join(p_m %>% select(STATION_ID, fecha, VALUE),
             by = c("STATION_ID", "fecha"))
 
-stopifnot(nrow(verificacion_M) == 26,
+stopifnot(nrow(verificacion_M) == 36,
           all(!is.na(verificacion_M$VALUE)),
           all(verificacion_M$valor_original == verificacion_M$VALUE))
 
@@ -395,10 +535,9 @@ p_m_depurado <- p_m_depurado %>%
 trazabilidad_M <- acumulados_tratar_M %>%
   mutate(valor_nuevo = NA_real_,
          tratamiento = "Excluido de serie diaria",
-         justificacion = paste("Unico registro al cierre del mes",
-                               "con patron repetido en el mismo anio"))
+         justificacion = "Unico registro valido del mes, ubicado en el ultimo dia")
 
-# Los 10 casos aislados se guardan sin modificar
+# Comprobar que no quedan casos sin tratar
 acumulados_pendientes_M <- mensuales_M %>%
   anti_join(acumulados_tratar_M %>%
               mutate(YEAR = as.integer(format(fecha, "%Y")),
@@ -406,11 +545,71 @@ acumulados_pendientes_M <- mensuales_M %>%
               select(STATION_ID, YEAR, MONTH),
             by = c("STATION_ID", "YEAR", "MONTH"))
 
-# Verificar que los 313 ceros se conservaron
-ceros_antes <- sum(p_m$VALUE == 0, na.rm = TRUE)
-ceros_despues <- sum(p_m_depurado$VALUE == 0, na.rm = TRUE)
+# Cinco meses con ceros sospechosos y precipitacion concentrada al final
+meses_ceros_tratar_M <- tibble(
+  STATION_ID = c(2623300101, 2611400103, 2612710106,
+                 2622900301, 2610000105),
+  YEAR = c(1987, 1987, 1987, 1992, 1986),
+  MONTH = c(11, 9, 7, 8, 12),
+  motivo = "Ceros sospechosos y precipitacion concentrada al final"
+)
 
-stopifnot(ceros_antes == ceros_despues)
+# Siete meses completamente en cero con anomalia historica y regional
+meses_todo_cero_tratar_M <- tibble(
+  STATION_ID = c(2612000113, 2612000110, 2612000112,
+                 2612000202, 2612700203, 2612720101,
+                 2622600201),
+  YEAR = c(1997, 2003, 2003, 1990, 1990, 1992, 1994),
+  MONTH = c(1, 5, 5, 2, 9, 10, 9),
+  motivo = "Mes completamente en cero con anomalia historica y regional"
+)
+
+# Unificar los doce meses seleccionados
+meses_adicionales_M <- bind_rows(
+  meses_ceros_tratar_M,
+  meses_todo_cero_tratar_M
+)
+
+stopifnot(nrow(meses_adicionales_M) == 12,
+          nrow(distinct(meses_adicionales_M, STATION_ID, YEAR, MONTH)) == 12)
+
+# Guardar los valores originales antes de modificarlos
+trazabilidad_adicional_M <- p_m_depurado %>%
+  inner_join(meses_adicionales_M,
+             by = c("STATION_ID", "YEAR", "MONTH")) %>%
+  filter(!is.na(VALUE)) %>%
+  transmute(STATION_ID, YEAR, MONTH, fecha,
+            valor_original = VALUE,
+            valor_nuevo = NA_real_,
+            tratamiento = "Excluido de serie diaria",
+            justificacion = motivo)
+
+# Verificar que los doce meses tengan registros
+stopifnot(nrow(distinct(trazabilidad_adicional_M,
+                        STATION_ID, YEAR, MONTH)) == 12)
+
+# Convertir todos los valores de los meses seleccionados en NA
+p_m_depurado <- p_m_depurado %>%
+  left_join(meses_adicionales_M %>%
+              transmute(STATION_ID, YEAR, MONTH, tratar_adicional_M = TRUE),
+            by = c("STATION_ID", "YEAR", "MONTH")) %>%
+  mutate(VALUE = if_else(!is.na(tratar_adicional_M), NA_real_, as.numeric(VALUE))) %>%
+  select(-tratar_adicional_M)
+
+# Unificar la trazabilidad de todas las modificaciones
+trazabilidad_total_M <- bind_rows(
+  trazabilidad_M %>%
+    mutate(YEAR = as.integer(format(fecha, "%Y")),
+           MONTH = as.integer(format(fecha, "%m"))),
+  trazabilidad_adicional_M
+) %>%
+  arrange(STATION_ID, fecha)
+
+# Verificar que las modificaciones coincidan con la trazabilidad
+stopifnot(
+  nrow(trazabilidad_total_M) ==
+    sum(!is.na(p_m$VALUE)) - sum(!is.na(p_m_depurado$VALUE))
+)
 
 # Comparacion antes y despues
 contar_pares <- function(datos) {
@@ -432,12 +631,17 @@ comparacion_M <- data.frame(etapa = c("Antes de M", "Despues de M"),
 print(comparacion_M)
 
 cat("Acumulados tratados:", nrow(trazabilidad_M), "\n")
-cat("Casos aislados conservados:", nrow(acumulados_pendientes_M), "\n")
-cat("Ceros modificados:", ceros_antes - ceros_despues, "\n")
+cat("Meses adicionales tratados:", nrow(meses_adicionales_M), "\n")
+cat("Registros adicionales convertidos en NA:", nrow(trazabilidad_adicional_M), "\n")
+cat("Total de registros modificados en M:", nrow(trazabilidad_total_M), "\n")
+cat("Ceros modificados:",
+    sum(p_m$VALUE == 0, na.rm = TRUE) -
+      sum(p_m_depurado$VALUE == 0, na.rm = TRUE), "\n")
 
 # Tablas de trazabilidad de M
-print(trazabilidad_M, n = Inf)
+print(trazabilidad_total_M, n = Inf)
 print(acumulados_pendientes_M, n = Inf)
+
 
 ####################################################
 # Dias faltantes y años incompletos (1981-2003)
