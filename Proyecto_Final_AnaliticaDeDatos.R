@@ -20,7 +20,7 @@ set.seed(2026)
 
 # DIRECTORIO DE TRABAJO
 rm(list=ls())
-setwd("C:/Users/yenpa/Desktop/analitica 3/proyecto_final_analiticaDeDatos")
+setwd("C:/Users/maria/Downloads/proyecto_final_analiticaDeDatos")
 dir.create("Figuras", showWarnings = FALSE)
 
 # CARGA DE DATOS: PRECIPITACION SATELITE Y TIERRA
@@ -1425,85 +1425,35 @@ tiempos <- 1:72
 K_evaluar <- c(6, 8, 10, 12, 15, 20, 25, 30)
 orden <- 4  # B-splines cubicas
 
-# 2. CONSTRUCCION MANUAL DE LA MATRIZ B-SPLINE
-# Recurrencia de Cox-de Boor
 
+# 2. CONSTRUCCION DE LA MATRIZ B-SPLINE CON FDA
 
+# La libreria fda debe estar cargada
+library(fda)
+
+# Funcion para construir y evaluar bases B-spline
 construir_bspline <- function(t, K, orden = 4) {
-
-if (K < orden) {
-  stop("K debe ser mayor o igual al orden.")
-}
-
-a <- min(tiempos)
-b <- max(tiempos)
-
-# Nodos interiores equiespaciados
-n_internos <- K - orden
-
-internos <- if (n_internos > 0) {
-  seq(a, b, length.out = n_internos + 2)[
-    2:(n_internos + 1)
-  ]
-} else {
-  numeric(0)
-}
-
-# Vector de nodos con extremos repetidos
-nodos <- c(
-  rep(a, orden),
-  internos,
-  rep(b, orden)
-)
-
-# Bases de orden 1
-N <- matrix(
-  0,
-  nrow = length(t),
-  ncol = length(nodos) - 1
-)
-
-for (j in seq_len(ncol(N))) {
-  N[, j] <- as.numeric(
-    t >= nodos[j] & t < nodos[j + 1]
-  )
-}
-
-# Recurrencia hasta el orden solicitado
-for (d in 2:orden) {
   
-  N_nuevo <- matrix(
-    0,
-    nrow = length(t),
-    ncol = ncol(N) - 1
-  )
-  
-  for (j in seq_len(ncol(N_nuevo))) {
-    
-    den1 <- nodos[j + d - 1] - nodos[j]
-    den2 <- nodos[j + d] - nodos[j + 1]
-    
-    if (den1 > 0) {
-      N_nuevo[, j] <- N_nuevo[, j] +
-        ((t - nodos[j]) / den1) * N[, j]
-    }
-    
-    if (den2 > 0) {
-      N_nuevo[, j] <- N_nuevo[, j] +
-        ((nodos[j + d] - t) / den2) * N[, j + 1]
-    }
+  if (K < orden) {
+    stop("K debe ser mayor o igual al orden.")
   }
   
-  N <- N_nuevo
-}
-
-# Incluir el extremo derecho del dominio
-N[t == b, ] <- 0
-N[t == b, K] <- 1
-
-colnames(N) <- paste0("B", seq_len(K))
-
-return(N)
+  # Dominio temporal comun: 72 pentadas
+  rangval <- range(tiempos)
+  
+  # Crear base B-spline
+  BasePrec <- create.bspline.basis(
+    rangeval = rangval,
+    nbasis = K,
+    norder = orden
+  )
+  
+  # Evaluar las funciones base en los tiempos indicados
+  Phi <- eval.basis(t, BasePrec)
+  
+  colnames(Phi) <- paste0("B", seq_len(K))
+  
+  return(Phi)
 }
 
 # 3. COMPROBAR LA BASE COMPLETA
@@ -1655,3 +1605,539 @@ resultados_rango %>%
     .groups = "drop"
   ) %>%
   print()
+
+
+# ============================================================
+# CONSTRUCCION Y DIAGNOSTICO DE DATOS FUNCIONALES
+# MCO, MCP, MCG Y MCG RESTRINGIDO
+# ============================================================
+
+# 1. DATOS Y PARAMETROS
+stopifnot(identical(dim(Y_train), dim(X_train)),
+          identical(rownames(Y_train), rownames(X_train)),
+          identical(colnames(Y_train), colnames(X_train)),
+          ncol(Y_train) == length(tiempos),
+          exists("construir_bspline"), requireNamespace("fda", quietly = TRUE))
+
+fuentes <- list(terrestre = Y_train, satelital = X_train)
+K_evaluar <- c(6, 8, 10, 12, 15, 20, 25, 30)
+orden <- 4
+umbral_condicion <- 1e4
+K_demo <- 12
+K_mostrar <- c(6, 12, 20)
+K_diagnostico <- c(6, 12, 20)
+tolerancia <- 1e-8
+malla <- seq(min(tiempos), max(tiempos), length.out = 721)
+
+
+# 2. CONSTRUCCION FUNCIONAL POR MCO
+# c = (Phi'Phi)^(-1) Phi'y
+# C = (Phi'Phi)^(-1) Phi' ;  S = Phi C
+
+ajustar_MCO <- function(M, K) {
+  Phi <- construir_bspline(tiempos, K, orden)
+  n <- nrow(M)
+  coeficientes <- matrix(NA_real_, n, K,
+                         dimnames = list(rownames(M), colnames(Phi)))
+  predicciones <- residuos <- diagonal_S <- matrix(NA_real_, n, ncol(M),
+                                                   dimnames = dimnames(M))
+  metricas <- data.frame(curva = rownames(M), K = K,
+                         n = rowSums(is.finite(M)), estado = "ok",
+                         condicion = NA_real_, SSE = NA_real_, gl = NA_real_)
+  
+  for (i in seq_len(n)) {
+    y <- as.numeric(M[i, ])
+    obs <- which(is.finite(y))
+    P <- Phi[obs, , drop = FALSE]
+    if (length(obs) <= K || qr(P, tol = 1e-9)$rank < K) {
+      metricas$estado[i] <- "rango_incompleto"
+      next
+    }
+    condicion <- kappa(P, exact = TRUE)
+    metricas$condicion[i] <- condicion
+    if (!is.finite(condicion) || condicion > umbral_condicion) {
+      metricas$estado[i] <- "mal_condicionada"
+      next
+    }
+    C <- solve(crossprod(P), t(P))
+    c_est <- as.vector(C %*% y[obs])
+    pred <- as.vector(Phi %*% c_est)
+    e <- y[obs] - pred[obs]
+    coeficientes[i, ] <- c_est
+    predicciones[i, ] <- pred
+    residuos[i, obs] <- e
+    diagonal_S[i, obs] <- rowSums(P * t(C))
+    metricas$SSE[i] <- sum(e^2)
+    metricas$gl[i] <- sum(diagonal_S[i, obs])
+  }
+  list(Phi = Phi, coeficientes = coeficientes, predicciones = predicciones,
+       residuos = residuos, diagonal_S = diagonal_S, metricas = metricas)
+}
+
+resultados_MCO <- lapply(fuentes, function(M)
+  setNames(lapply(K_evaluar, function(K) ajustar_MCO(M, K)), K_evaluar))
+
+metricas_MCO <- do.call(rbind, lapply(names(fuentes), function(fuente)
+  do.call(rbind, lapply(resultados_MCO[[fuente]], function(a)
+    data.frame(fuente = fuente, a$metricas)))))
+rownames(metricas_MCO) <- NULL
+cat("\nAJUSTES MCO POR FUENTE Y K\n")
+print(with(metricas_MCO, table(fuente, K, estado)))
+
+# 2.1 VERIFICACION MATRICIAL DE C Y S
+id_demo <- which(rowSums(is.finite(Y_train)) == ncol(Y_train))[1]
+stopifnot(length(id_demo) == 1, !is.na(id_demo))
+Phi <- resultados_MCO$terrestre[[as.character(K_demo)]]$Phi
+y <- as.numeric(Y_train[id_demo, ])
+C <- solve(crossprod(Phi), t(Phi))
+y2cMap <- C  # Nombre utilizado en las clases de regresion funcional
+S <- Phi %*% C
+c_est <- as.vector(C %*% y)
+y_est <- as.vector(Phi %*% c_est)
+verificacion_S <- data.frame(
+  curva = rownames(Y_train)[id_demo], K = K_demo,
+  filas_C = nrow(C), columnas_C = ncol(C),
+  filas_S = nrow(S), columnas_S = ncol(S),
+  simetria = max(abs(S - t(S))),
+  idempotencia = max(abs(S %*% S - S)),
+  traza = sum(diag(S)), diferencia_K = abs(sum(diag(S)) - K_demo),
+  diferencia_ajuste = max(abs(as.vector(S %*% y) - y_est)))
+cat("\nPROPIEDADES DE LA MATRIZ SUAVIZADORA MCO\n")
+print(verificacion_S)
+stopifnot(verificacion_S$simetria < 1e-7,
+          verificacion_S$idempotencia < 1e-7,
+          verificacion_S$diferencia_K < 1e-7,
+          verificacion_S$diferencia_ajuste < 1e-7)
+
+# 2.2 COMPARACION CON fda::smooth.basis
+base_demo <- fda::create.bspline.basis(range(tiempos), nbasis = K_demo,
+                                       norder = orden)
+comparacion_fda <- do.call(rbind, lapply(names(fuentes), function(fuente) {
+  M <- fuentes[[fuente]]
+  id <- which(rowSums(is.finite(M)) == ncol(M))[1]
+  a <- fda::smooth.basis(tiempos, as.numeric(M[id, ]), base_demo)
+  manual <- resultados_MCO[[fuente]][[as.character(K_demo)]]
+  data.frame(fuente = fuente,
+             diferencia_coef = max(abs(manual$coeficientes[id, ] - as.vector(a$fd$coefs))),
+             diferencia_pred = max(abs(manual$predicciones[id, ] -
+                                         as.vector(fda::eval.fd(tiempos, a$fd)))))
+}))
+cat("\nCOMPARACION MCO Y SMOOTH.BASIS\n")
+print(comparacion_fda)
+
+# 2.3 GRAFICA: EFECTO DEL NUMERO DE BASES
+if (interactive()) {
+  op <- par(mfrow = c(1, 2))
+  for (fuente in names(fuentes)) {
+    M <- fuentes[[fuente]]
+    plot(tiempos, M[id_demo, ], pch = 16, cex = 0.5,
+         xlab = "Pentada", ylab = "Precipitacion (mm)",
+         main = paste("Ajuste funcional -", fuente))
+    for (j in seq_along(K_mostrar))
+      lines(tiempos,
+            resultados_MCO[[fuente]][[as.character(K_mostrar[j])]]$predicciones[id_demo, ],
+            col = j + 1, lwd = 2)
+    legend("topright", legend = paste("K =", K_mostrar),
+           col = seq_along(K_mostrar) + 1, lty = 1, bty = "n")
+  }
+  par(op)
+}
+
+# 3. DIAGNOSTICOS DE MCO: HETEROCEDASTICIDAD Y CORRELACION
+# Se examinan los residuos MCO, no se asume que sean los errores
+# originales: el suavizado tambien puede inducir correlaciones.
+lluviosas <- c(13:30, 49:66)  # Indices de pentadas usados en el analisis
+otras <- setdiff(seq_along(tiempos), lluviosas)
+
+diagnostico_hetero <- do.call(rbind, lapply(names(fuentes), function(fuente) {
+  do.call(rbind, lapply(K_diagnostico, function(K) {
+    R <- resultados_MCO[[fuente]][[as.character(K)]]$residuos
+    var_p <- apply(R, 2, var, na.rm = TRUE)
+    v_lluviosa <- apply(R[, lluviosas, drop = FALSE], 1, var, na.rm = TRUE)
+    v_otra <- apply(R[, otras, drop = FALSE], 1, var, na.rm = TRUE)
+    validos <- is.finite(v_lluviosa) & is.finite(v_otra) & v_otra > 0
+    razon <- v_lluviosa[validos] / v_otra[validos]
+    data.frame(fuente = fuente, K = K, curvas = sum(validos),
+               var_min = min(var_p, na.rm = TRUE),
+               var_max = max(var_p, na.rm = TRUE),
+               razon_mediana = median(razon),
+               pct_mayor_var_lluviosa = 100 * mean(razon > 1))
+  }))
+}))
+rownames(diagnostico_hetero) <- NULL
+cat("\nHETEROCEDASTICIDAD: VARIANZA RESIDUAL POR TEMPORADA\n")
+print(diagnostico_hetero)
+
+# 3.1 GRAFICA: VARIANZA RESIDUAL POR PENTADA (K = 12)
+if (interactive()) {
+  op <- par(mfrow = c(1, 2))
+  for (fuente in names(fuentes)) {
+    R <- resultados_MCO[[fuente]][[as.character(K_demo)]]$residuos
+    plot(tiempos, apply(R, 2, var, na.rm = TRUE), type = "l", lwd = 2,
+         main = paste("Varianza residual MCO -", fuente),
+         xlab = "Pentada", ylab = "Varianza residual")
+  }
+  par(op)
+}
+
+# 3.2 GRAFICA: CORRELACION RESIDUAL ENTRE PENTADAS (K = 12)
+if (interactive()) {
+  op <- par(mfrow = c(1, 2))
+  for (fuente in names(fuentes)) {
+    R <- resultados_MCO[[fuente]][[as.character(K_demo)]]$residuos
+    Cor <- cor(R, use = "pairwise.complete.obs")
+    contour(tiempos, tiempos, Cor, nlevels = 10,
+            xlab = "Pentada s", ylab = "Pentada t",
+            main = paste("Correlacion residual MCO -", fuente))
+  }
+  par(op)
+}
+
+# 4. DIAGNOSTICO DE PRECIPITACIONES NEGATIVAS EN MCO
+diagnostico_negativos <- do.call(rbind, lapply(names(fuentes), function(fuente) {
+  do.call(rbind, lapply(K_evaluar, function(K) {
+    P <- resultados_MCO[[fuente]][[as.character(K)]]$predicciones
+    data.frame(fuente = fuente, K = K,
+               negativos = sum(P < -tolerancia, na.rm = TRUE),
+               curvas_afectadas = sum(rowSums(P < -tolerancia, na.rm = TRUE) > 0),
+               minimo = min(P, na.rm = TRUE))
+  }))
+}))
+rownames(diagnostico_negativos) <- NULL
+cat("\nVALORES NEGATIVOS EN MCO ANTES DE RESTRINGIR\n")
+print(diagnostico_negativos)
+
+# 5. COMPARACION MCO, MCP Y MCG
+# MCP considera varianzas distintas (diagonal); MCG tambien
+# incorpora covarianzas. Se comparan en pentadas reservadas.
+set.seed(123)
+estaciones <- sub("_[0-9]{4}$", "", rownames(Y_train))
+est_ref <- sample(unique(estaciones), floor(0.7 * length(unique(estaciones))))
+idx_ref <- estaciones %in% est_ref
+idx_eval <- !idx_ref
+pentadas_prueba <- seq(5, 72, by = 5)
+alpha <- 0.5  # Regularizacion exploratoria de la covarianza
+
+# Ajuste sin restricciones; Sigma = NULL equivale a MCO.
+ajustar_metodo <- function(y, Phi, obs, Sigma = NULL) {
+  tryCatch({
+    P <- Phi[obs, , drop = FALSE]
+    z <- y[obs]
+    if (!is.null(Sigma)) {
+      L <- t(chol(Sigma[obs, obs, drop = FALSE]))
+      z <- forwardsolve(L, z)
+      P <- forwardsolve(L, P)
+    }
+    if (nrow(P) <= ncol(P) || qr(P, tol = 1e-9)$rank < ncol(P)) return(NULL)
+    condicion <- kappa(P, exact = TRUE)
+    if (!is.finite(condicion) || condicion > umbral_condicion) return(NULL)
+    coef <- as.vector(solve(crossprod(P), crossprod(P, z)))
+    list(coef = coef, pred = as.vector(Phi %*% coef))
+  }, error = function(e) NULL)
+}
+
+# MCG restringido: minimize ||L^(-1)(y-Phi*c)||^2, c >= 0.
+# Una sola version definitiva: optim y alternativa nlminb.
+ajustar_MCG_positivo <- function(y, Phi, obs, Sigma) {
+  K <- ncol(Phi)
+  if (length(obs) <= K) return(list(estado = "observaciones_insuficientes"))
+  A <- tryCatch({
+    L <- t(chol(Sigma[obs, obs, drop = FALSE]))
+    list(P = forwardsolve(L, Phi[obs, , drop = FALSE]),
+         z = forwardsolve(L, y[obs]))
+  }, error = function(e) NULL)
+  if (is.null(A)) return(list(estado = "error_covarianza"))
+  Pw <- A$P
+  zw <- A$z
+  if (qr(Pw, tol = 1e-9)$rank < K)
+    return(list(estado = "rango_incompleto"))
+  condicion <- kappa(Pw, exact = TRUE)
+  if (!is.finite(condicion) || condicion > umbral_condicion)
+    return(list(estado = "mal_condicionada"))
+  escala <- max(1, sum(zw^2))
+  objetivo <- function(c) sum((zw - Pw %*% c)^2) / escala
+  gradiente <- function(c) as.vector(2 * crossprod(Pw, Pw %*% c - zw) / escala)
+  inicio <- tryCatch(pmax(0, as.vector(qr.solve(Pw, zw))),
+                     error = function(e) NULL)
+  if (is.null(inicio)) return(list(estado = "error_inicio"))
+  ajuste <- tryCatch(
+    optim(inicio, objetivo, gradiente, method = "L-BFGS-B",
+          lower = rep(0, K), control = list(maxit = 3000)),
+    error = function(e) NULL)
+  if (is.null(ajuste) || ajuste$convergence != 0 ||
+      any(!is.finite(ajuste$par))) {
+    ajuste <- tryCatch(
+      nlminb(inicio, objetivo, gradiente, lower = rep(0, K),
+             control = list(iter.max = 3000, eval.max = 5000)),
+      error = function(e) NULL)
+  }
+  if (is.null(ajuste) || ajuste$convergence != 0 ||
+      any(!is.finite(ajuste$par))) return(list(estado = "sin_convergencia"))
+  coef <- pmax(0, ajuste$par)
+  g <- gradiente(coef)
+  g[coef <= 1e-8 & g > 0] <- 0
+  if (max(abs(g)) > 1e-4) return(list(estado = "optimalidad_no_verificada"))
+  list(estado = "ok", coef = coef,
+       pred = as.vector(Phi %*% coef),
+       error_ponderado = sum((zw - Pw %*% coef)^2))
+}
+
+# 5.1 MATRICES DE COVARIANZA Y VALIDACION DE LOS TRES METODOS
+resultados_comparacion <- list()
+diagnostico_metodos <- list()
+for (fuente in names(fuentes)) {
+  M <- fuentes[[fuente]]
+  resultados_comparacion[[fuente]] <- list()
+  for (K in K_evaluar) {
+    clave <- as.character(K)
+    a <- resultados_MCO[[fuente]][[clave]]
+    R <- a$residuos
+    ref_ok <- idx_ref & rowSums(is.finite(R)) == ncol(R)
+    R_ref <- R[ref_ok, , drop = FALSE]
+    if (nrow(R_ref) <= ncol(R_ref)) stop("Curvas de referencia insuficientes")
+    Sigma <- cov(R_ref)
+    D <- diag(diag(Sigma), ncol(M))
+    eps <- 0.01 * median(diag(Sigma))
+    Sigma_MCP <- D + eps * diag(ncol(M))
+    Sigma_MCG <- (1 - alpha) * Sigma + alpha * D + eps * diag(ncol(M))
+    
+    detalle <- list()
+    ejemplo <- NULL
+    # Negativos de los mismos ajustes validados; evita otro recorrido.
+    conteo <- matrix(0, 3, 4, dimnames = list(c("MCO", "MCP", "MCG"),
+                                              c("curvas", "negativos", "afectadas", "neg_prueba")))
+    minimos <- rep(Inf, 3)
+    for (i in which(idx_eval)) {
+      y <- as.numeric(M[i, ])
+      prueba <- intersect(which(is.finite(y)), pentadas_prueba)
+      obs <- setdiff(which(is.finite(y)), prueba)
+      if (!length(prueba)) next
+      ajustes <- list(MCO = ajustar_metodo(y, a$Phi, obs),
+                      MCP = ajustar_metodo(y, a$Phi, obs, Sigma_MCP),
+                      MCG = ajustar_metodo(y, a$Phi, obs, Sigma_MCG))
+      if (any(vapply(ajustes, is.null, logical(1)))) next
+      detalle[[length(detalle) + 1]] <- data.frame(
+        curva = rownames(M)[i],
+        MCO = mean((y[prueba] - ajustes$MCO$pred[prueba])^2),
+        MCP = mean((y[prueba] - ajustes$MCP$pred[prueba])^2),
+        MCG = mean((y[prueba] - ajustes$MCG$pred[prueba])^2))
+      for (j in seq_along(ajustes)) {
+        p <- ajustes[[j]]$pred
+        conteo[j, ] <- conteo[j, ] + c(1, sum(p < -tolerancia),
+                                       as.integer(any(p < -tolerancia)),
+                                       sum(p[prueba] < -tolerancia))
+        minimos[j] <- min(minimos[j], p)
+      }
+      if (is.null(ejemplo))
+        ejemplo <- c(list(y = y, prueba = prueba, curva = rownames(M)[i]),
+                     lapply(ajustes, function(z) z$pred))
+    }
+    detalle <- if (length(detalle)) do.call(rbind, detalle) else
+      data.frame(curva = character(), MCO = numeric(), MCP = numeric(), MCG = numeric())
+    resultados_comparacion[[fuente]][[clave]] <- list(
+      Sigma_MCP = Sigma_MCP, Sigma_MCG = Sigma_MCG,
+      detalle = detalle, ejemplo = ejemplo)
+    diagnostico_metodos[[paste(fuente, K)]] <- data.frame(
+      fuente = fuente, K = K, metodo = rownames(conteo),
+      curvas = conteo[, "curvas"], negativos = conteo[, "negativos"],
+      curvas_afectadas = conteo[, "afectadas"],
+      negativos_prueba = conteo[, "neg_prueba"],
+      minimo = ifelse(is.finite(minimos), minimos, NA_real_))
+  }
+}
+
+comparacion_metodos <- do.call(rbind, lapply(names(fuentes), function(fuente)
+  do.call(rbind, lapply(K_evaluar, function(K) {
+    d <- resultados_comparacion[[fuente]][[as.character(K)]]$detalle
+    data.frame(fuente = fuente, K = K, curvas = nrow(d),
+               ECM_MCO = if (nrow(d)) mean(d$MCO) else NA_real_,
+               ECM_MCP = if (nrow(d)) mean(d$MCP) else NA_real_,
+               ECM_MCG = if (nrow(d)) mean(d$MCG) else NA_real_)
+  }))))
+rownames(comparacion_metodos) <- NULL
+comparacion_metodos$mejora_MCP <- with(comparacion_metodos,
+                                       100 * (ECM_MCO - ECM_MCP) / ECM_MCO)
+comparacion_metodos$mejora_MCG <- with(comparacion_metodos,
+                                       100 * (ECM_MCO - ECM_MCG) / ECM_MCO)
+cat("\nMCO, MCP Y MCG: ECM EN PENTADAS RESERVADAS Y MEJORA VS MCO\n")
+print(comparacion_metodos)
+
+diagnostico_metodos <- do.call(rbind, diagnostico_metodos)
+rownames(diagnostico_metodos) <- NULL
+diagnostico_metodos$porcentaje_afectadas <- with(diagnostico_metodos,
+                                                 100 * curvas_afectadas / curvas)
+cat("\nVALORES NEGATIVOS ANTES DE RESTRINGIR: MCO, MCP Y MCG\n")
+print(diagnostico_metodos)
+
+# 5.2 PROPIEDADES MATRICIALES DE MCG
+Phi <- resultados_MCO$terrestre[[as.character(K_demo)]]$Phi
+Sigma <- resultados_comparacion$terrestre[[as.character(K_demo)]]$Sigma_MCG
+W <- solve(Sigma)
+C_MCG <- solve(crossprod(Phi, W %*% Phi), t(Phi) %*% W)
+S_MCG <- Phi %*% C_MCG
+verificacion_MCG <- data.frame(
+  idempotencia = max(abs(S_MCG %*% S_MCG - S_MCG)),
+  traza = sum(diag(S_MCG)),
+  simetria_ponderada = max(abs(t(S_MCG) %*% W - W %*% S_MCG)),
+  simetria_ordinaria = max(abs(S_MCG - t(S_MCG))))
+cat("\nPROPIEDADES DE LA MATRIZ SUAVIZADORA MCG\n")
+print(verificacion_MCG)
+
+# 5.3 GRAFICA: MCO, MCP Y MCG (K = 12)
+if (interactive()) {
+  op <- par(mfrow = c(1, 2))
+  for (fuente in names(fuentes)) {
+    a <- resultados_comparacion[[fuente]][[as.character(K_demo)]]$ejemplo
+    if (is.null(a)) next
+    plot(tiempos, a$y, pch = 16, cex = 0.5,
+         xlab = "Pentada", ylab = "Precipitacion (mm)",
+         main = paste("MCO, MCP y MCG -", fuente))
+    lines(tiempos, a$MCO, col = "blue", lwd = 2)
+    lines(tiempos, a$MCP, col = "red", lwd = 2)
+    lines(tiempos, a$MCG, col = "darkgreen", lwd = 2)
+    points(tiempos[a$prueba], a$y[a$prueba], pch = 4, cex = 1.2)
+    legend("topright", c("MCO", "MCP", "MCG", "Pentadas reservadas"),
+           col = c("blue", "red", "darkgreen", "black"),
+           lty = c(1, 1, 1, 0), pch = c(NA, NA, NA, 4), bty = "n")
+  }
+  par(op)
+}
+
+# 6. CONSTRUCCION DE TODAS LAS CURVAS CON MCG RESTRINGIDO
+# Coeficientes c >= 0 garantizan x(t) >= 0 porque las B-splines
+# son no negativas. No se recortan las predicciones a posteriori.
+# Esta restriccion puede aumentar el error: se comprueba con ECM.
+
+resultados_MCG_restringido <- list()
+for (fuente in names(fuentes)) {
+  M <- fuentes[[fuente]]
+  resultados_MCG_restringido[[fuente]] <- list()
+  for (K in K_evaluar) {
+    clave <- as.character(K)
+    Phi <- resultados_MCO[[fuente]][[clave]]$Phi
+    Sigma <- resultados_comparacion[[fuente]][[clave]]$Sigma_MCG
+    coeficientes <- matrix(NA_real_, nrow(M), K,
+                           dimnames = list(rownames(M), colnames(Phi)))
+    predicciones <- pred_MCG <- matrix(NA_real_, nrow(M), ncol(M),
+                                       dimnames = dimnames(M))
+    metricas <- data.frame(curva = rownames(M), estado = "no_evaluado",
+                           minimo_MCG = NA_real_, minimo_restringido = NA_real_,
+                           negativos_MCG = NA_integer_, negativos_restringido = NA_integer_,
+                           ECM_MCG = NA_real_, ECM_restringido = NA_real_)
+    for (i in seq_len(nrow(M))) {
+      y <- as.numeric(M[i, ])
+      obs <- which(is.finite(y))
+      mcg <- ajustar_metodo(y, Phi, obs, Sigma)
+      positivo <- ajustar_MCG_positivo(y, Phi, obs, Sigma)
+      metricas$estado[i] <- positivo$estado
+      # Se conserva el restringido aunque falle el MCG ordinario.
+      if (positivo$estado == "ok") {
+        coeficientes[i, ] <- positivo$coef
+        predicciones[i, ] <- positivo$pred
+        metricas$minimo_restringido[i] <- min(positivo$pred)
+        metricas$negativos_restringido[i] <- sum(positivo$pred < -tolerancia)
+        metricas$ECM_restringido[i] <- mean((y[obs] - positivo$pred[obs])^2)
+      }
+      if (!is.null(mcg)) {
+        pred_MCG[i, ] <- mcg$pred
+        metricas$minimo_MCG[i] <- min(mcg$pred)
+        metricas$negativos_MCG[i] <- sum(mcg$pred < -tolerancia)
+        metricas$ECM_MCG[i] <- mean((y[obs] - mcg$pred[obs])^2)
+      }
+    }
+    resultados_MCG_restringido[[fuente]][[clave]] <- list(
+      Phi = Phi, Sigma = Sigma, coeficientes = coeficientes,
+      predicciones = predicciones, pred_MCG = pred_MCG, metricas = metricas)
+  }
+}
+
+# 6.1 VERIFICACION DE POSITIVIDAD PARA TODOS LOS K
+verificacion_final <- do.call(rbind, lapply(names(fuentes), function(fuente)
+  do.call(rbind, lapply(K_evaluar, function(K) {
+    a <- resultados_MCG_restringido[[fuente]][[as.character(K)]]
+    C <- a$coeficientes
+    P <- a$predicciones
+    data.frame(fuente = fuente, K = K,
+               ajustadas = sum(a$metricas$estado == "ok"),
+               pendientes = sum(a$metricas$estado != "ok"),
+               coef_negativos = sum(C < -tolerancia, na.rm = TRUE),
+               pred_negativas = sum(P < -tolerancia, na.rm = TRUE),
+               minimo = min(P, na.rm = TRUE))
+  }))))
+rownames(verificacion_final) <- NULL
+cat("\nVERIFICACION FINAL: COBERTURA Y NO NEGATIVIDAD\n")
+print(verificacion_final)
+
+curvas_pendientes <- do.call(rbind, lapply(names(fuentes), function(fuente)
+  do.call(rbind, lapply(K_evaluar, function(K) {
+    m <- resultados_MCG_restringido[[fuente]][[as.character(K)]]$metricas
+    p <- m[m$estado != "ok", c("curva", "estado"), drop = FALSE]
+    if (!nrow(p)) return(NULL)
+    data.frame(fuente = fuente, K = K, p)
+  }))))
+cat("\nCASOS PENDIENTES DE AJUSTE RESTRINGIDO\n")
+if (is.null(curvas_pendientes)) cat("Ninguno\n") else {
+  rownames(curvas_pendientes) <- NULL
+  print(curvas_pendientes)
+}
+
+# 6.2 VALIDACION MCG VS MCG RESTRINGIDO
+# Solo estaciones de evaluacion; mismas pentadas reservadas.
+# Incluye los ajustes que antes se recuperaban en otro bloque.
+comparacion_validacion <- list()
+for (fuente in names(fuentes)) {
+  M <- fuentes[[fuente]]
+  for (K in K_evaluar) {
+    clave <- as.character(K)
+    a <- resultados_MCG_restringido[[fuente]][[clave]]
+    ecm <- list()
+    for (i in which(idx_eval)) {
+      y <- as.numeric(M[i, ])
+      prueba <- intersect(which(is.finite(y)), pentadas_prueba)
+      obs <- setdiff(which(is.finite(y)), prueba)
+      if (!length(prueba)) next
+      mcg <- ajustar_metodo(y, a$Phi, obs, a$Sigma)
+      positivo <- ajustar_MCG_positivo(y, a$Phi, obs, a$Sigma)
+      if (is.null(mcg) || positivo$estado != "ok") next
+      ecm[[length(ecm) + 1]] <- c(
+        MCG = mean((y[prueba] - mcg$pred[prueba])^2),
+        restringido = mean((y[prueba] - positivo$pred[prueba])^2))
+    }
+    d <- if (length(ecm)) do.call(rbind, ecm) else matrix(numeric(), 0, 2)
+    comparacion_validacion[[paste(fuente, K)]] <- data.frame(
+      fuente = fuente, K = K, curvas = nrow(d),
+      ECM_MCG = if (nrow(d)) mean(d[, 1]) else NA_real_,
+      ECM_restringido = if (nrow(d)) mean(d[, 2]) else NA_real_)
+  }
+}
+comparacion_validacion <- do.call(rbind, comparacion_validacion)
+rownames(comparacion_validacion) <- NULL
+comparacion_validacion$mejora_pct <- with(comparacion_validacion,
+                                          100 * (ECM_MCG - ECM_restringido) / ECM_MCG)
+cat("\nMCG VS MCG RESTRINGIDO: ECM EN PENTADAS RESERVADAS\n")
+print(comparacion_validacion)
+
+# 6.3 GRAFICA: MCG VS MCG RESTRINGIDO (K = 12)
+if (interactive()) {
+  op <- par(mfrow = c(1, 2))
+  for (fuente in names(fuentes)) {
+    M <- fuentes[[fuente]]
+    a <- resultados_MCG_restringido[[fuente]][[as.character(K_demo)]]
+    candidatos <- which(a$metricas$negativos_MCG > 0 &
+                          a$metricas$estado == "ok")
+    i <- if (length(candidatos)) candidatos[1] else
+      which(a$metricas$estado == "ok")[1]
+    if (is.na(i)) next
+    base <- fda::create.bspline.basis(range(tiempos), K_demo, orden)
+    pred_fina <- as.vector(fda::eval.basis(malla, base) %*% a$coeficientes[i, ])
+    plot(tiempos, M[i, ], pch = 16, cex = 0.5,
+         xlab = "Pentada", ylab = "Precipitacion (mm)",
+         main = paste("MCG vs MCG restringido -", fuente))
+    lines(tiempos, a$pred_MCG[i, ], col = "blue", lwd = 2)
+    lines(malla, pred_fina, col = "red", lwd = 2)
+    abline(h = 0, lty = 2)
+    legend("topright", c("MCG", "MCG restringido"),
+           col = c("blue", "red"), lty = 1, lwd = 2, bty = "n")
+  }
+  par(op)
+}
