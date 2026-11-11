@@ -55,6 +55,10 @@ valle <- departamentos_col[departamentos_col$NAME_1 == "Valle del Cauca", ]
 
 
 ##### Valores imposibles y errores de digitacion #####
+# Valores negativos 
+sum(p_tierra$VALUE < 0, na.rm = TRUE)
+sum(p_prueba$VALUE < 0, na.rm = TRUE)
+
 summary(p_tierra)
 quantile(p_tierra$VALUE, probs = c(0.5, 0.9, 0.95, 0.99, 0.999, 0.99999), na.rm = TRUE)
 tapply(p_tierra$VALUE, p_tierra$YEAR, summary)
@@ -491,7 +495,7 @@ ajustar_MCO <- function(M, K) {
   estado <- rep("ok", nrow(M))
   SSE <- rep(NA, nrow(M))
   gl <- rep(NA, nrow(M))
-
+  
   for (i in 1:nrow(M)) {
     obs <- which(!is.na(M[i, ]))
     P <- Phi[obs, ]
@@ -696,12 +700,12 @@ ajustar_MCG_positivo <- function(y, Phi, obs, Sigma) {
   Pw <- forwardsolve(L, Phi[obs, ])
   zw <- forwardsolve(L, y[obs])
   if (kappa(Pw, exact = TRUE) > 1e4) return(list(estado = "mal_condicionada"))
-
+  
   escala <- max(1, sum(zw^2))
   objetivo <- function(c) sum((zw - Pw %*% c)^2) / escala
   gradiente <- function(c) as.vector(2 * t(Pw) %*% (Pw %*% c - zw) / escala)
   inicio <- pmax(0, as.vector(qr.solve(Pw, zw)))
-
+  
   ajuste <- optim(inicio, objetivo, gradiente, method = "L-BFGS-B",
                   lower = rep(0, K), control = list(maxit = 3000))
   if (ajuste$convergence != 0) {
@@ -709,7 +713,7 @@ ajustar_MCG_positivo <- function(y, Phi, obs, Sigma) {
                      control = list(iter.max = 3000, eval.max = 5000))
   }
   if (ajuste$convergence != 0) return(list(estado = "sin_convergencia"))
-
+  
   coef <- pmax(0, ajuste$par)
   g <- gradiente(coef)
   g[coef <= 1e-8 & g > 0] <- 0
@@ -725,7 +729,7 @@ for (fuente in names(fuentes)) {
   sigmas[[fuente]] <- list()
   for (K in K_evaluar) {
     a <- resultados_MCO[[fuente]][[as.character(K)]]
-
+    
     # Covarianza de los residuos MCO de las curvas completas de referencia
     R_ref <- a$residuos[idx_ref & rowSums(is.na(a$residuos)) == 0, ]
     Sigma <- cov(R_ref)
@@ -733,7 +737,7 @@ for (fuente in names(fuentes)) {
     Sigma_MCP <- diag(diag(Sigma)) + eps * diag(72)
     Sigma_MCG <- 0.5 * Sigma + 0.5 * diag(diag(Sigma)) + eps * diag(72)
     sigmas[[fuente]][[as.character(K)]] <- Sigma_MCG
-
+    
     ecm <- c()
     negativos <- c(MCO = 0, MCP = 0, MCG = 0)
     for (i in which(!idx_ref)) {
@@ -778,7 +782,7 @@ for (fuente in names(fuentes)) {
   for (K in K_evaluar) {
     Phi <- construir_bspline(tiempos, K)
     Sigma <- sigmas[[fuente]][[as.character(K)]]
-
+    
     # Todas las curvas
     coeficientes <- matrix(NA, nrow(M), K)
     predicciones <- matrix(NA, nrow(M), 72)
@@ -796,7 +800,7 @@ for (fuente in names(fuentes)) {
                                            coef_negativos = sum(coeficientes < -1e-8, na.rm = TRUE),
                                            pred_negativas = sum(predicciones < -1e-8, na.rm = TRUE),
                                            minimo = min(predicciones, na.rm = TRUE)))
-
+    
     # Validacion en las pentadas reservadas: MCG frente a MCG restringido
     ecm <- c()
     for (i in which(!idx_ref)) {
@@ -966,6 +970,30 @@ VC_dejar_uno <- mean((y - prediccion)^2)
 VC_atajo
 VC_dejar_uno
 
+# Valores negativos en las curvas ajustadas 
+ajuste_MCP <- function(datos, Phi, pesos) {
+  ajustes <- matrix(NA, nrow(datos), 72)
+  for (i in 1:nrow(datos)) {
+    obs <- which(!is.na(datos[i, ]))
+    P <- Phi[obs, ]
+    ajustes[i, ] <- Phi %*% solve(t(P * pesos[obs]) %*% P) %*% t(P * pesos[obs]) %*% datos[i, obs]
+  }
+  ajustes
+}
+
+Phi_estaciones <- eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 5))
+Phi_satelite <- eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 9))
+ajustes_estaciones <- ajuste_MCP(Y_train, Phi_estaciones, 1 / apply(residuos_estaciones^2, 2, mean, na.rm = TRUE))
+ajustes_satelite <- ajuste_MCP(X_train, Phi_satelite, 1 / apply(residuos_satelite^2, 2, mean, na.rm = TRUE))
+
+# Porcentaje de valores negativos, curvas afectadas y valor minimo
+mean(ajustes_estaciones < 0) * 100
+sum(rowSums(ajustes_estaciones < 0) > 0)
+min(ajustes_estaciones)
+mean(ajustes_satelite < 0) * 100
+sum(rowSums(ajustes_satelite < 0) > 0)
+min(ajustes_satelite)
+
 # La diferencia entre penalizar y no penalizar es minima (menos del 1 % en la VC).
 # Fourier es la base con mejor rendimiento en todas las comparaciones.
 # MCO se rechaza: la varianza de los residuos cambia a lo largo del año
@@ -974,6 +1002,7 @@ VC_dejar_uno
 # estimada con los residuos no es invertible.
 # Se escoge K = 5 para estaciones y K = 9 para satelite (menor VC con Fourier y MCP).
 
+# El 0.95% de los datos de estacion tiene valores menores a cero.
 
 
 
