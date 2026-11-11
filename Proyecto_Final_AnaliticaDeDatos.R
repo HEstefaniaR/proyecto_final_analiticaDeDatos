@@ -1,12 +1,11 @@
-####################################################
-# Proyecto 3 
+# PROYECTO 3
 # Por: Natalia Paredes, Mariana Cifuentes, John Franco
 # y Estefanía Hernández
-####################################################
-##### LIBRERIAS
+# LIBRERIAS
 #install.packages("fda")
 #install.packages("fda.usc")
 #install.packages("readxl")
+#install.packages("tidyr")
 library(fda)
 library(fda.usc)
 library(readxl)
@@ -15,15 +14,16 @@ library(dplyr)
 library(ggplot2)
 library(tidyterra)
 library(geodata)
+library(tidyr)
 
 set.seed(2026)
 
-## DIRECTORIO DE TRABAJO
+# DIRECTORIO DE TRABAJO
 rm(list=ls())
-setwd("C:/Users/maria/Downloads/proyecto_final_analiticaDeDatos")
+setwd("C:/Users/yenpa/Desktop/analitica 3/proyecto_final_analiticaDeDatos")
 dir.create("Figuras", showWarnings = FALSE)
 
-##### CARGA DE DATOS: precipitacion satelite y tierra
+# CARGA DE DATOS: PRECIPITACION SATELITE Y TIERRA
 p_tierra_1930_1979 <- read_excel("data/P_1930_1979.xlsx")
 p_tierra_1980_1990 <- read.csv("data/P_1980_1990.csv")
 p_tierra_1991_2003 <- read.csv("data/P_1991_2003.csv")
@@ -32,23 +32,51 @@ p_tierra_1991_2003 <- read.csv("data/P_1991_2003.csv")
 p_satelite <- rast(list.files("data/ImagenesSatelitePentadal", 
                               pattern = "ppt.*\\.tif$", full.names = TRUE))
 
-# de 1930 a 2003
-p_tierra <- bind_rows(p_tierra_1930_1979, 
-                      p_tierra_1980_1990, 
-                      p_tierra_1991_2003)
+# Periodo principal del proyecto: 1981-2003
+p_tierra <- bind_rows( 
+  p_tierra_1980_1990, 
+  p_tierra_1991_2003) %>%
+  filter(between(YEAR, 1981, 2003))
 
-p_tierra <- p_tierra[, -c(2, 7)]
+# Conservar las columnas necesarias para construir la fecha.
+# No eliminar columnas por posicion: antes se borraba YEAR/MONTH/DAY
+# cuando cambiaba el orden de los archivos.
+columnas_requeridas <- c("STATION_ID", "YEAR", "MONTH", "DAY", "VALUE")
+faltantes <- setdiff(columnas_requeridas, names(p_tierra))
+if (length(faltantes) > 0) {
+  stop("Faltan columnas en p_tierra: ", paste(faltantes, collapse = ", "),
+       ". Columnas disponibles: ", paste(names(p_tierra), collapse = ", "))
+}
 p_tierra$fecha <- as.Date(sprintf("%04d-%02d-%02d", p_tierra$YEAR, p_tierra$MONTH, p_tierra$DAY))
 p_tierra <- p_tierra[order(p_tierra$STATION_ID, p_tierra$fecha), ]
+
+# Reservar prueba sin someterla al preprocesamiento de desarrollo
+p_prueba <- p_tierra %>% filter(between(YEAR, 2001, 2003))
+
+# Aplicar los bloques existentes solo a entrenamiento y validacion
+p_tierra <- p_tierra %>% filter(between(YEAR, 1981, 2000))
+
+# Cargar coordenadas y altitudes
+id_txt <- function(x) trimws(format(x, scientific = FALSE, trim = TRUE))
+
+coord <- read.csv("data/CVC_Wheather_Stations_Long_Lat.csv",
+                  fileEncoding = "latin1") %>%
+  transmute(STATION_ID = id_txt(CODIGO),
+            longitud = as.numeric(Lon),
+            latitud = as.numeric(lat))
+
+alt <- read_excel("data/CatalogoEstacionesElevacion.xlsx") %>%
+  transmute(STATION_ID = id_txt(codigo),
+            altitud = as.numeric(alt))
+
+stopifnot(!anyDuplicated(coord$STATION_ID),
+          !anyDuplicated(alt$STATION_ID))
+
+info_estaciones <- full_join(coord, alt, by = "STATION_ID")
 
 # Borde del Valle
 departamentos_col <- gadm(country = "COL", level = 1, path = tempdir())  
 valle <- departamentos_col[departamentos_col$NAME_1 == "Valle del Cauca", ]
-
-ggplot() + geom_spatraster(data = p_satelite[[1]]) +
-  geom_sf(data = valle, fill = NA, color = "black", linewidth = 0.5) +
-  labs(title = "Precipitación 01-01-1981") 
-
 
 # Valores imposibles
 summary(p_tierra)
@@ -56,20 +84,20 @@ summary(p_tierra)
 quantile(p_tierra$VALUE, probs = c(0.5, 0.9, 0.95, 0.99, 0.999, 0.99999), na.rm = TRUE)
 tapply(p_tierra$VALUE, p_tierra$YEAR, summary)
 
-## 1984: valor 859375
+# 1984: VALOR 859375
 sum(p_tierra$VALUE > 300, na.rm = TRUE)
 
 mayores_300 <- p_tierra[!is.na(p_tierra$VALUE) & p_tierra$VALUE > 300,
                         c("STATION_ID", "YEAR", "MONTH", "DAY", "VALUE")]
 mayores_300 <- mayores_300[order(-mayores_300$YEAR), ]
-print(mayores_300, n = 300)
+print(head(mayores_300, 300))
 
-## Valores menores al percentil 99.9 (120 mm)
+# VALORES MENORES AL PERCENTIL 99.9 (120 MM)
 hist(p_tierra$VALUE[p_tierra$VALUE < 120], 
      main = "Precipitación diaria",
      xlab = "Precipitación (mm)", ylab = "Frecuencia")
 
-## Outliers en cada estacion y año
+# OUTLIERS EN CADA ESTACION Y AÑO
 casos <- unique(mayores_300[, c("STATION_ID", "YEAR")])
 casos <- casos[order(casos$YEAR, casos$STATION_ID), ]
 nrow(casos)   
@@ -91,7 +119,7 @@ for (i in seq_len(nrow(casos))) {
 
 par(mfrow = c(1, 1))
 
-## Eliminar los valores aislados > 400
+# ELIMINAR LOS VALORES AISLADOS > 400
 fin_mes <- format(p_tierra$fecha + 1, "%d") == "01"
 
 n <- nrow(p_tierra)
@@ -110,13 +138,10 @@ length(unique(p_tierra$STATION_ID[error]))
 p_tierra$VALUE[error] <- NA
 
 sum(p_tierra$VALUE > 300, na.rm = TRUE)
-####################################################
 # ACUMULADOS MENSUALES Y CEROS FALSOS
-####################################################
-
-## Datos del periodo disponible (1981-2003)
+# DATOS PARA DESARROLLO DEL PREPROCESAMIENTO (1981-2000)
 p_m <- p_tierra %>%
-  filter(YEAR >= 1981, YEAR <= 2003) %>%
+  filter(YEAR >= 1981, YEAR <= 2000) %>%
   arrange(STATION_ID, fecha) %>%
   mutate(fin_mes = format(fecha + 1, "%d") == "01")
 
@@ -125,7 +150,7 @@ cat("Estaciones:", n_distinct(p_m$STATION_ID), "\n")
 cat("Pares estacion-anio:", nrow(distinct(p_m, STATION_ID, YEAR)), "\n")
 
 
-## Resumen de registros por estacion y mes
+# RESUMEN DE REGISTROS POR ESTACION Y MES
 resumen_mensual <- p_m %>%
   group_by(STATION_ID, YEAR, MONTH) %>%
   summarise(n_registros = n_distinct(fecha),
@@ -141,7 +166,7 @@ resumen_mensual <- p_m %>%
             },
             .groups = "drop")
 
-## Indicadores de posibles acumulados
+# INDICADORES DE POSIBLES ACUMULADOS
 resumen_mensual <- resumen_mensual %>%
   mutate(proporcion_ceros = ifelse(n_validos > 0, n_ceros / n_validos, NA_real_),
          proporcion_fin_mes = ifelse(total_observado > 0,
@@ -152,34 +177,34 @@ resumen_mensual <- resumen_mensual %>%
            proporcion_fin_mes >= 0.80)
 
 
-## Meses candidatos
+# MESES CANDIDATOS
 candidatos_M <- resumen_mensual %>%
   filter(candidato) %>%
   arrange(STATION_ID, YEAR, MONTH)
 
 cat("Meses candidatos:", nrow(candidatos_M), "\n")
 
-print(candidatos_M %>%
-        select(STATION_ID, YEAR, MONTH, n_registros, n_ceros, n_positivos,
-               valor_fin_mes, total_observado, proporcion_fin_mes),
+print(tibble::as_tibble(candidatos_M %>%
+                          select(STATION_ID, YEAR, MONTH, n_registros, n_ceros, n_positivos,
+                                 valor_fin_mes, total_observado, proporcion_fin_mes)),
       n = 30)
 
-## Patrones que se repiten en varios meses del mismo anio
+# PATRONES QUE SE REPITEN EN VARIOS MESES DEL MISMO ANIO
 patrones_M <- candidatos_M %>%
   group_by(STATION_ID, YEAR) %>%
   summarise(meses_sospechosos = n(), .groups = "drop") %>%
   arrange(desc(meses_sospechosos))
 
-print(patrones_M, n = 30)
+print(tibble::as_tibble(patrones_M), n = 30)
 
-## Casos conocidos en detalle
+# CASOS CONOCIDOS EN DETALLE
 caso_1981 <- resumen_mensual %>% filter(STATION_ID == 5421200201, YEAR == 1981)
 caso_1986 <- resumen_mensual %>% filter(STATION_ID == 5300000201, YEAR == 1986)
 
-print(caso_1981, n = 12)
-print(caso_1986, n = 12)
+print(tibble::as_tibble(caso_1981), n = 12)
+print(tibble::as_tibble(caso_1986), n = 12)
 
-## Ceros en los meses candidatos
+# CEROS EN LOS MESES CANDIDATOS
 # Son candidatos de revision, NO ceros falsos confirmados
 ceros_M <- p_m %>%
   semi_join(candidatos_M, by = c("STATION_ID", "YEAR", "MONTH")) %>%
@@ -187,7 +212,7 @@ ceros_M <- p_m %>%
 
 cat("Ceros en meses candidatos:", nrow(ceros_M), "\n")
 
-## Conteos del diagnostico
+# CONTEOS DEL DIAGNOSTICO
 diagnostico_M <- data.frame(indicador = c("Registros del periodo",
                                           "Estaciones",
                                           "Pares estacion-anio",
@@ -206,7 +231,7 @@ diagnostico_M <- data.frame(indicador = c("Registros del periodo",
 print(diagnostico_M)
 
 
-## Totales mensuales segun la estructura de registros
+# TOTALES MENSUALES SEGUN LA ESTRUCTURA DE REGISTROS
 # Meses con una sola observacion valida ubicada en el ultimo dia del mes
 mensuales_M <- resumen_mensual %>%
   filter(n_registros == 1, n_validos == 1, !is.na(valor_fin_mes)) %>%
@@ -214,17 +239,17 @@ mensuales_M <- resumen_mensual %>%
 
 cat("Meses con un unico registro al final:", nrow(mensuales_M), "\n")
 
-print(mensuales_M %>%
-        select(STATION_ID, YEAR, MONTH, n_registros, valor_fin_mes),
+print(tibble::as_tibble(mensuales_M %>%
+                          select(STATION_ID, YEAR, MONTH, n_registros, valor_fin_mes)),
       n = 40)
 
-## Patrones repetidos por estacion y anio
+# PATRONES REPETIDOS POR ESTACION Y ANIO
 patrones_mensuales <- mensuales_M %>%
   group_by(STATION_ID, YEAR) %>%
   summarise(meses_con_un_registro = n(), .groups = "drop") %>%
   arrange(desc(meses_con_un_registro))
 
-print(patrones_mensuales, n = 30)
+print(tibble::as_tibble(patrones_mensuales), n = 30)
 
 
 # Considerar todos los meses con un unico registro al final
@@ -233,9 +258,9 @@ alta_sospecha_M <- patrones_mensuales %>%
 
 cat("Pares estacion-anio con registro unico al final:", nrow(alta_sospecha_M), "\n")
 
-print(alta_sospecha_M, n = 30)
+print(tibble::as_tibble(alta_sospecha_M), n = 30)
 
-## Estaciones problematicas a traves de los anios
+# ESTACIONES PROBLEMATICAS A TRAVES DE LOS ANIOS
 problemas_estacion <- patrones_mensuales %>%
   group_by(STATION_ID) %>%
   summarise(anios_afectados = n_distinct(YEAR),
@@ -244,10 +269,10 @@ problemas_estacion <- patrones_mensuales %>%
             .groups = "drop") %>%
   arrange(desc(meses_sospechosos))
 
-print(problemas_estacion, n = Inf)
+print(tibble::as_tibble(problemas_estacion), n = Inf)
 
 
-## Auditoria de acumulados: fechas exactas de los casos prioritarios
+# AUDITORIA DE ACUMULADOS: FECHAS EXACTAS DE LOS CASOS PRIORITARIOS
 auditoria_acumulados_M <- p_m %>%
   inner_join(mensuales_M %>%
                semi_join(alta_sospecha_M, by = c("STATION_ID", "YEAR")) %>%
@@ -263,10 +288,10 @@ auditoria_acumulados_M <- p_m %>%
 
 cat("Registros prioritarios:", nrow(auditoria_acumulados_M), "\n")
 
-print(auditoria_acumulados_M, n = Inf)
+print(tibble::as_tibble(auditoria_acumulados_M), n = Inf)
 
 
-## Diagnostico de ceros falsos
+# DIAGNOSTICO DE CEROS FALSOS
 # Meses con muchos ceros y un pico final
 diagnostico_ceros_M <- resumen_mensual %>%
   filter(n_registros >= 25,
@@ -281,9 +306,9 @@ diagnostico_ceros_M <- resumen_mensual %>%
 
 cat("Meses con ceros potencialmente falsos:", nrow(diagnostico_ceros_M), "\n")
 
-print(diagnostico_ceros_M, n = Inf)
+print(tibble::as_tibble(diagnostico_ceros_M), n = Inf)
 
-## Registros cero para revision (no se modifican)
+# REGISTROS CERO PARA REVISION (NO SE MODIFICAN)
 auditoria_ceros_M <- p_m %>%
   semi_join(diagnostico_ceros_M, by = c("STATION_ID", "YEAR", "MONTH")) %>%
   filter(VALUE == 0) %>%
@@ -294,9 +319,9 @@ auditoria_ceros_M <- p_m %>%
 
 cat("Ceros candidatos a revision:", nrow(auditoria_ceros_M), "\n")
 
-print(auditoria_ceros_M, n = Inf)
+print(tibble::as_tibble(auditoria_ceros_M), n = Inf)
 
-## Dias con lluvia positiva dentro de esos meses
+# DIAS CON LLUVIA POSITIVA DENTRO DE ESOS MESES
 revision_ceros <- p_m %>%
   semi_join(diagnostico_ceros_M, by = c("STATION_ID", "YEAR", "MONTH")) %>%
   filter(!is.na(VALUE), VALUE > 0) %>%
@@ -307,9 +332,9 @@ revision_ceros <- p_m %>%
             valores_lluvia = paste(VALUE, collapse = ", "),
             .groups = "drop")
 
-print(revision_ceros, n = Inf)
+print(tibble::as_tibble(revision_ceros), n = Inf)
 
-## Contexto temporal: mes anterior, sospechoso y posterior
+# CONTEXTO TEMPORAL: MES ANTERIOR, SOSPECHOSO Y POSTERIOR
 meses_ceros <- diagnostico_ceros_M %>%
   distinct(STATION_ID, YEAR, MONTH) %>%
   mutate(fecha_mes = as.Date(sprintf("%04d-%02d-01", YEAR, MONTH)))
@@ -325,7 +350,7 @@ contexto_ceros_M <- bind_rows(meses_ceros %>% select(STATION_ID, fecha_mes),
   arrange(STATION_ID, fecha_mes) %>%
   select(STATION_ID, YEAR, MONTH, n_registros, n_ceros, n_positivos, valor_fin_mes)
 
-print(contexto_ceros_M, n = Inf)
+print(tibble::as_tibble(contexto_ceros_M), n = Inf)
 
 # Evaluacion historica:frecuencia de dias lluviosos por mes
 historico_M <- resumen_mensual %>%
@@ -359,7 +384,7 @@ comparacion_historica_M <- diagnostico_ceros_M %>%
                                TRUE ~ "Sin evidencia fuerte")) %>%
   arrange(prioridad, diferencia)
 
-print(comparacion_historica_M, n = Inf)
+print(tibble::as_tibble(comparacion_historica_M), n = Inf)
 
 
 # Comparacion historica de los 11 meses con ceros sospechosos
@@ -383,7 +408,7 @@ comparacion_ceros_historica_M <- resumen_mensual %>%
             .groups = "drop") %>%
   arrange(STATION_ID, anio_sospechoso)
 
-print(comparacion_ceros_historica_M, n = Inf)
+print(tibble::as_tibble(comparacion_ceros_historica_M), n = Inf)
 
 
 # Comparar los 11 meses sospechosos con otras estaciones
@@ -430,7 +455,7 @@ comparacion_otras_estaciones_M <- meses_sospechosos_M %>%
       pct_ceros_sospechosos - mediana_ceros_historica_otras, 1)) %>%
   arrange(desc(diferencia_mismo_anio))
 
-print(comparacion_otras_estaciones_M, n = Inf, width = Inf)
+print(tibble::as_tibble(comparacion_otras_estaciones_M), n = Inf, width = Inf)
 
 # Historico de lluvia concentrada al final del mes
 historico_picos_M <- diagnostico_ceros_M %>%
@@ -452,7 +477,7 @@ historico_picos_M <- diagnostico_ceros_M %>%
             veces_unica_lluvia_final = sum(unica_lluvia_final, na.rm = TRUE),
             .groups = "drop")
 
-print(historico_picos_M, n = Inf, width = Inf)
+print(tibble::as_tibble(historico_picos_M), n = Inf, width = Inf)
 
 # Detectar meses completos con precipitacion igual a cero
 resumen_ceros_completos_M <- resumen_mensual %>%
@@ -501,117 +526,195 @@ comparacion_todo_cero_M <- historico_todo_cero_M %>%
 cat("Meses completos con todos los valores en cero:",
     nrow(meses_todo_cero_M), "\n")
 
-print(head(comparacion_todo_cero_M, 30), width = Inf)
+print(tibble::as_tibble(head(comparacion_todo_cero_M, 30)), width = Inf)
 
 
-# Limpieza final y trazabilidad
+# LIMPIEZA FINAL Y TRAZABILIDAD
 p_m_depurado <- p_m
 
-# Los 36 registros con unica observacion al final del mes
-acumulados_tratar_M <- auditoria_acumulados_M %>%
-  select(STATION_ID, fecha, valor_original, motivo) %>%
-  distinct(STATION_ID, fecha, .keep_all = TRUE)
+# Seleccionar exclusivamente los 33 meses candidatos a acumulados
+# Criterio: lluvia final >= 100 mm y >= 80% del total mensual
+acumulados_tratar_M <- p_m %>%
+  semi_join(
+    candidatos_M %>%
+      select(STATION_ID, YEAR, MONTH),
+    by = c("STATION_ID", "YEAR", "MONTH")
+  ) %>%
+  filter(fin_mes, !is.na(VALUE)) %>%
+  transmute(
+    STATION_ID, YEAR, MONTH, fecha,
+    valor_original = VALUE,
+    motivo = "Precipitacion final >= 100 mm y >= 80% del total mensual"
+  ) %>%
+  distinct(STATION_ID, fecha, .keep_all = TRUE) %>%
+  arrange(STATION_ID, fecha)
 
-# Verificar que los registros coincidan con la base
-stopifnot(nrow(acumulados_tratar_M) == 36)
+# Verificar los 33 candidatos
+stopifnot(
+  nrow(candidatos_M) == 33,
+  nrow(acumulados_tratar_M) == nrow(candidatos_M)
+)
 
+# Verificar coincidencia con la base original
 verificacion_M <- acumulados_tratar_M %>%
-  left_join(p_m %>% select(STATION_ID, fecha, VALUE),
-            by = c("STATION_ID", "fecha"))
+  left_join(
+    p_m %>% select(STATION_ID, fecha, VALUE),
+    by = c("STATION_ID", "fecha")
+  )
 
-stopifnot(nrow(verificacion_M) == 36,
-          all(!is.na(verificacion_M$VALUE)),
-          all(verificacion_M$valor_original == verificacion_M$VALUE))
+stopifnot(
+  nrow(verificacion_M) == nrow(acumulados_tratar_M),
+  all(!is.na(verificacion_M$VALUE)),
+  all(verificacion_M$valor_original == verificacion_M$VALUE)
+)
 
-# Marcar los acumulados como NA en la copia diaria
+# Convertir en NA unicamente los 33 registros de fin de mes
 p_m_depurado <- p_m_depurado %>%
-  left_join(acumulados_tratar_M %>%
-              transmute(STATION_ID, fecha, tratar_M = TRUE),
-            by = c("STATION_ID", "fecha")) %>%
-  mutate(VALUE = if_else(!is.na(tratar_M), NA_real_, as.numeric(VALUE))) %>%
+  left_join(
+    acumulados_tratar_M %>%
+      transmute(STATION_ID, fecha, tratar_M = TRUE),
+    by = c("STATION_ID", "fecha")
+  ) %>%
+  mutate(
+    VALUE = if_else(
+      !is.na(tratar_M),
+      NA_real_,
+      as.numeric(VALUE)
+    )
+  ) %>%
   select(-tratar_M)
 
-# Registrar cada modificacion
+# Registrar modificaciones de acumulados
 trazabilidad_M <- acumulados_tratar_M %>%
-  mutate(valor_nuevo = NA_real_,
-         tratamiento = "Excluido de serie diaria",
-         justificacion = "Unico registro valido del mes, ubicado en el ultimo dia")
+  mutate(
+    valor_nuevo = NA_real_,
+    tratamiento = "Excluido de serie diaria",
+    justificacion = motivo
+  )
 
-# Comprobar que no quedan casos sin tratar
-acumulados_pendientes_M <- mensuales_M %>%
-  anti_join(acumulados_tratar_M %>%
-              mutate(YEAR = as.integer(format(fecha, "%Y")),
-                     MONTH = as.integer(format(fecha, "%m"))) %>%
-              select(STATION_ID, YEAR, MONTH),
-            by = c("STATION_ID", "YEAR", "MONTH"))
+# Verificar que no queden candidatos sin tratar
+acumulados_pendientes_M <- candidatos_M %>%
+  anti_join(
+    acumulados_tratar_M %>%
+      select(STATION_ID, YEAR, MONTH),
+    by = c("STATION_ID", "YEAR", "MONTH")
+  )
 
-# Cinco meses con ceros sospechosos y precipitacion concentrada al final
+stopifnot(nrow(acumulados_pendientes_M) == 0)
+
+# CEROS SOSPECHOSOS
+# Cinco meses con ceros sospechosos y lluvia al final
 meses_ceros_tratar_M <- tibble(
-  STATION_ID = c(2623300101, 2611400103, 2612710106,
-                 2622900301, 2610000105),
+  STATION_ID = c(
+    2623300101, 2611400103, 2612710106,
+    2622900301, 2610000105
+  ),
   YEAR = c(1987, 1987, 1987, 1992, 1986),
   MONTH = c(11, 9, 7, 8, 12),
   motivo = "Ceros sospechosos y precipitacion concentrada al final"
 )
 
-# Siete meses completamente en cero con anomalia historica y regional
+# Meses completamente en cero previamente seleccionados
+# Los casos de 2003 se mantienen fuera del desarrollo
 meses_todo_cero_tratar_M <- tibble(
-  STATION_ID = c(2612000113, 2612000110, 2612000112,
-                 2612000202, 2612700203, 2612720101,
-                 2622600201),
+  STATION_ID = c(
+    2612000113, 2612000110, 2612000112,
+    2612000202, 2612700203, 2612720101,
+    2622600201
+  ),
   YEAR = c(1997, 2003, 2003, 1990, 1990, 1992, 1994),
   MONTH = c(1, 5, 5, 2, 9, 10, 9),
   motivo = "Mes completamente en cero con anomalia historica y regional"
 )
 
-# Unificar los doce meses seleccionados
+# Unificar solo los meses de 1981-2000
 meses_adicionales_M <- bind_rows(
   meses_ceros_tratar_M,
   meses_todo_cero_tratar_M
-)
+) %>%
+  filter(between(YEAR, 1981, 2000))
 
-stopifnot(nrow(meses_adicionales_M) == 12,
-          nrow(distinct(meses_adicionales_M, STATION_ID, YEAR, MONTH)) == 12)
+stopifnot(
+  nrow(meses_adicionales_M) == 10,
+  nrow(distinct(
+    meses_adicionales_M, STATION_ID, YEAR, MONTH
+  )) == 10
+)
 
 # Guardar los valores originales antes de modificarlos
 trazabilidad_adicional_M <- p_m_depurado %>%
-  inner_join(meses_adicionales_M,
-             by = c("STATION_ID", "YEAR", "MONTH")) %>%
+  inner_join(
+    meses_adicionales_M,
+    by = c("STATION_ID", "YEAR", "MONTH")
+  ) %>%
   filter(!is.na(VALUE)) %>%
-  transmute(STATION_ID, YEAR, MONTH, fecha,
-            valor_original = VALUE,
-            valor_nuevo = NA_real_,
-            tratamiento = "Excluido de serie diaria",
-            justificacion = motivo)
+  transmute(
+    STATION_ID, YEAR, MONTH, fecha,
+    valor_original = VALUE,
+    valor_nuevo = NA_real_,
+    tratamiento = "Excluido de serie diaria",
+    justificacion = motivo
+  )
 
-# Verificar que los doce meses tengan registros
-stopifnot(nrow(distinct(trazabilidad_adicional_M,
-                        STATION_ID, YEAR, MONTH)) == 12)
+# Verificar que los 10 meses tengan registros validos
+stopifnot(
+  nrow(distinct(
+    trazabilidad_adicional_M,
+    STATION_ID, YEAR, MONTH
+  )) == nrow(meses_adicionales_M)
+)
 
-# Convertir todos los valores de los meses seleccionados en NA
+# Convertir todos los valores de esos 10 meses a NA
 p_m_depurado <- p_m_depurado %>%
-  left_join(meses_adicionales_M %>%
-              transmute(STATION_ID, YEAR, MONTH, tratar_adicional_M = TRUE),
-            by = c("STATION_ID", "YEAR", "MONTH")) %>%
-  mutate(VALUE = if_else(!is.na(tratar_adicional_M), NA_real_, as.numeric(VALUE))) %>%
+  left_join(
+    meses_adicionales_M %>%
+      transmute(
+        STATION_ID, YEAR, MONTH,
+        tratar_adicional_M = TRUE
+      ),
+    by = c("STATION_ID", "YEAR", "MONTH")
+  ) %>%
+  mutate(
+    VALUE = if_else(
+      !is.na(tratar_adicional_M),
+      NA_real_,
+      as.numeric(VALUE)
+    )
+  ) %>%
   select(-tratar_adicional_M)
 
-# Unificar la trazabilidad de todas las modificaciones
+# TRAZABILIDAD TOTAL
 trazabilidad_total_M <- bind_rows(
   trazabilidad_M %>%
-    mutate(YEAR = as.integer(format(fecha, "%Y")),
-           MONTH = as.integer(format(fecha, "%m"))),
-  trazabilidad_adicional_M
+    select(
+      STATION_ID, YEAR, MONTH, fecha,
+      valor_original, valor_nuevo,
+      tratamiento, justificacion
+    ),
+  trazabilidad_adicional_M %>%
+    select(
+      STATION_ID, YEAR, MONTH, fecha,
+      valor_original, valor_nuevo,
+      tratamiento, justificacion
+    )
 ) %>%
   arrange(STATION_ID, fecha)
 
-# Verificar que las modificaciones coincidan con la trazabilidad
+# Verificar que cada registro modificado sea unico
 stopifnot(
-  nrow(trazabilidad_total_M) ==
-    sum(!is.na(p_m$VALUE)) - sum(!is.na(p_m_depurado$VALUE))
+  !anyDuplicated(
+    trazabilidad_total_M[c("STATION_ID", "fecha")]
+  )
 )
 
-# Comparacion antes y despues
+# Verificar coincidencia entre limpieza y trazabilidad
+stopifnot(
+  nrow(trazabilidad_total_M) ==
+    sum(!is.na(p_m$VALUE)) -
+    sum(!is.na(p_m_depurado$VALUE))
+)
+
+# COMPARACION ANTES Y DESPUES
 contar_pares <- function(datos) {
   datos %>%
     filter(!is.na(VALUE)) %>%
@@ -619,34 +722,58 @@ contar_pares <- function(datos) {
     nrow()
 }
 
-comparacion_M <- data.frame(etapa = c("Antes de M", "Despues de M"),
-                            registros = c(nrow(p_m), nrow(p_m_depurado)),
-                            validos = c(sum(!is.na(p_m$VALUE)),
-                                        sum(!is.na(p_m_depurado$VALUE))),
-                            estaciones = c(n_distinct(p_m$STATION_ID[!is.na(p_m$VALUE)]),
-                                           n_distinct(p_m_depurado$STATION_ID[!is.na(p_m_depurado$VALUE)])),
-                            pares_estacion_anio = c(contar_pares(p_m),
-                                                    contar_pares(p_m_depurado)))
+comparacion_M <- data.frame(
+  etapa = c("Antes de M", "Despues de M"),
+  registros = c(
+    nrow(p_m),
+    nrow(p_m_depurado)
+  ),
+  validos = c(
+    sum(!is.na(p_m$VALUE)),
+    sum(!is.na(p_m_depurado$VALUE))
+  ),
+  estaciones = c(
+    n_distinct(p_m$STATION_ID[!is.na(p_m$VALUE)]),
+    n_distinct(
+      p_m_depurado$STATION_ID[!is.na(p_m_depurado$VALUE)]
+    )
+  ),
+  pares_estacion_anio = c(
+    contar_pares(p_m),
+    contar_pares(p_m_depurado)
+  )
+)
 
 print(comparacion_M)
 
-cat("Acumulados tratados:", nrow(trazabilidad_M), "\n")
-cat("Meses adicionales tratados:", nrow(meses_adicionales_M), "\n")
-cat("Registros adicionales convertidos en NA:", nrow(trazabilidad_adicional_M), "\n")
-cat("Total de registros modificados en M:", nrow(trazabilidad_total_M), "\n")
+# RESULTADOS DE LIMPIEZA
+cat("Meses candidatos a acumulados:",
+    nrow(candidatos_M), "\n")
+
+cat("Acumulados tratados:",
+    nrow(trazabilidad_M), "\n")
+
+cat("Meses adicionales tratados:",
+    nrow(meses_adicionales_M), "\n")
+
+cat("Registros adicionales convertidos en NA:",
+    nrow(trazabilidad_adicional_M), "\n")
+
+cat("Total de registros modificados en M:",
+    nrow(trazabilidad_total_M), "\n")
+
 cat("Ceros modificados:",
     sum(p_m$VALUE == 0, na.rm = TRUE) -
-      sum(p_m_depurado$VALUE == 0, na.rm = TRUE), "\n")
+      sum(p_m_depurado$VALUE == 0, na.rm = TRUE),
+    "\n")
 
-# Tablas de trazabilidad de M
-print(trazabilidad_total_M, n = Inf)
-print(acumulados_pendientes_M, n = Inf)
+# TABLAS DE TRAZABILIDAD
+print(tibble::as_tibble(trazabilidad_total_M), n = Inf)
+
+print(tibble::as_tibble(acumulados_pendientes_M), n = Inf)
 
 
-####################################################
-# Dias faltantes y años incompletos (1981-2003)
-####################################################
-
+# DIAS FALTANTES Y AÑOS INCOMPLETOS (1981-2000)
 # Construir calendario completo por estacion-anio
 datos_N <- p_m_depurado %>%
   select(STATION_ID, YEAR, fecha, VALUE) %>%
@@ -655,7 +782,7 @@ datos_N <- p_m_depurado %>%
 stopifnot(nrow(datos_N) == nrow(distinct(datos_N, STATION_ID, fecha)),
           !any(is.na(datos_N$fecha)))
 
-fechas_N <- tibble(fecha = seq(as.Date("1981-01-01"), as.Date("2003-12-31"), by = "day"),
+fechas_N <- tibble(fecha = seq(as.Date("1981-01-01"), as.Date("2000-12-31"), by = "day"),
                    YEAR = as.integer(format(fecha, "%Y")))
 
 calendario_N <- datos_N %>%
@@ -769,3 +896,762 @@ print(comparacion_N)
 pares_validos_N <- cobertura_N %>% filter(apto) %>% select(STATION_ID, YEAR)
 p_n_depurado <- p_m_depurado %>%
   semi_join(pares_validos_N, by = c("STATION_ID", "YEAR"))
+
+
+# Verificar los datos que dejó el preprocesamiento
+names(p_n_depurado)
+
+n_distinct(p_n_depurado$STATION_ID)
+
+nrow(distinct(p_n_depurado, STATION_ID, YEAR))
+
+head(p_n_depurado)
+
+# Calendario real de las 72 pentadas
+calendario_pentadas <- expand_grid(
+  YEAR = 1981:2000,
+  pentada = 1:72
+) %>%
+  mutate(
+    MONTH = (pentada - 1L) %/% 6L + 1L,
+    pentada_mes = (pentada - 1L) %% 6L + 1L,
+    inicio_mes = as.Date(sprintf("%04d-%02d-01", YEAR, MONTH)),
+    siguiente_mes = as.Date(format(inicio_mes + 32, "%Y-%m-01")),
+    dias_mes = as.integer(siguiente_mes - inicio_mes),
+    dia_inicio = (pentada_mes - 1L) * 5L + 1L,
+    dia_fin = ifelse(pentada_mes == 6L, dias_mes, pentada_mes * 5L),
+    fecha_inicio = inicio_mes + dia_inicio - 1L,
+    fecha_fin = inicio_mes + dia_fin - 1L,
+    dias_esperados = as.integer(fecha_fin - fecha_inicio) + 1L
+  ) %>%
+  select(YEAR, pentada, fecha_inicio, fecha_fin, dias_esperados)
+
+stopifnot(all(
+  calendario_pentadas %>%
+    group_by(YEAR) %>%
+    summarise(dias = sum(dias_esperados), .groups = "drop") %>%
+    mutate(esperados = ifelse(
+      (YEAR %% 4 == 0 & YEAR %% 100 != 0) | YEAR %% 400 == 0,
+      366, 365
+    )) %>%
+    transmute(ok = dias == esperados) %>%
+    pull(ok)
+))
+
+# EDA terrestre
+datos_tierra <- calendario_N %>%
+  semi_join(pares_validos_N, by = c("STATION_ID", "YEAR")) %>%
+  mutate(
+    STATION_ID = id_txt(STATION_ID),
+    MONTH = as.integer(format(fecha, "%m")),
+    DAY = as.integer(format(fecha, "%d")),
+    pentada_mes = pmin(6L, (DAY - 1L) %/% 5L + 1L),
+    pentada = (MONTH - 1L) * 6L + pentada_mes
+  )
+
+stopifnot(!anyDuplicated(datos_tierra[c("STATION_ID", "fecha")]))
+
+eda_terrestre <- datos_tierra %>%
+  group_by(YEAR) %>%
+  summarise(
+    estaciones = n_distinct(STATION_ID),
+    dias_validos = sum(!is.na(VALUE)),
+    dias_faltantes = sum(is.na(VALUE)),
+    media_diaria = mean(VALUE, na.rm = TRUE),
+    lluvia_maxima = max(VALUE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(tibble::as_tibble(eda_terrestre), n = Inf)
+summary(datos_tierra$VALUE)
+
+print(
+  ggplot(datos_tierra %>% filter(!is.na(VALUE)), aes(VALUE)) +
+    geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+    coord_cartesian(xlim = c(0, 120)) +
+    labs(title = "Distribucion de precipitacion terrestre",
+         x = "Precipitacion diaria (mm)", y = "Frecuencia") +
+    theme_bw()
+)
+
+print(
+  ggplot(eda_terrestre, aes(YEAR, estaciones)) +
+    geom_line(color = "steelblue") +
+    geom_point() +
+    labs(title = "Estaciones disponibles por anio",
+         x = "Anio", y = "Estaciones") +
+    theme_bw()
+)
+
+# Agregar lluvia terrestre por intervalos
+tierra_pentadal <- datos_tierra %>%
+  group_by(STATION_ID, YEAR, pentada) %>%
+  summarise(
+    dias_validos = sum(!is.na(VALUE)),
+    lluvia_observada = sum(VALUE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(calendario_pentadas,
+            by = c("YEAR", "pentada")) %>%
+  mutate(
+    dias_faltantes = dias_esperados - dias_validos,
+    lluvia_mm = ifelse(dias_faltantes == 0,
+                       lluvia_observada, NA_real_),
+    curva = paste(STATION_ID, YEAR, sep = "_")
+  )
+
+stopifnot(
+  nrow(tierra_pentadal) == 72 * nrow(pares_validos_N),
+  all(tierra_pentadal$dias_faltantes >= 0)
+)
+
+eda_pentadas <- tierra_pentadal %>%
+  group_by(pentada) %>%
+  summarise(
+    media_mm = mean(lluvia_mm, na.rm = TRUE),
+    mediana_mm = median(lluvia_mm, na.rm = TRUE),
+    desviacion = sd(lluvia_mm, na.rm = TRUE),
+    cobertura = 100 * mean(!is.na(lluvia_mm)),
+    .groups = "drop"
+  )
+
+
+# Matriz terrestre
+tabla_Y <- tierra_pentadal %>%
+  select(pentada, curva, lluvia_mm) %>%
+  pivot_wider(names_from = curva, values_from = lluvia_mm) %>%
+  arrange(pentada)
+
+Y_terrestre_total <- as.matrix(tabla_Y[, -1])
+rownames(Y_terrestre_total) <- tabla_Y$pentada
+
+# Datos satelitales
+ruta_tif <- "data/ImagenesSatelitePentadal"
+
+if (!dir.exists(ruta_tif)) {
+  zip_sat <- list.files("data",
+                        pattern = "^ImagenesSatelitePentadal.*\\.zip$",
+                        full.names = TRUE)
+  if (length(zip_sat) != 1)
+    stop("No se encontro la carpeta ni un ZIP satelital unico")
+  ruta_tif <- tempfile("satelite_")
+  dir.create(ruta_tif)
+  unzip(zip_sat, exdir = ruta_tif)
+}
+
+archivos_tif <- list.files(
+  ruta_tif, pattern = "^ppt[0-9]{6}\\.tif$",
+  full.names = TRUE, recursive = TRUE
+)
+
+if (length(archivos_tif) == 0)
+  stop("No se encontraron imagenes pptYYYYPP.tif")
+
+capas <- data.frame(
+  archivo = archivos_tif,
+  nombre = basename(archivos_tif)
+) %>%
+  mutate(
+    YEAR = as.integer(substr(nombre, 4, 7)),
+    pentada = as.integer(substr(nombre, 8, 9))
+  ) %>%
+  filter(between(YEAR, 1981, 2000)) %>%
+  arrange(YEAR, pentada) %>%
+  left_join(calendario_pentadas, by = c("YEAR", "pentada"))
+
+stopifnot(
+  !anyDuplicated(capas[c("YEAR", "pentada")]),
+  all(capas$pentada %in% 1:72),
+  !anyNA(capas$fecha_inicio)
+)
+
+disponibilidad_sat <- capas %>%
+  count(YEAR, name = "imagenes") %>%
+  mutate(faltantes = 72 - imagenes)
+
+print(as_tibble(disponibilidad_sat), n = Inf)
+
+
+# Cargar capas del periodo de desarrollo 1981-2000
+capas_modelo <- capas %>%
+  filter(between(YEAR, 1981, 2000))
+
+p_sat <- rast(capas_modelo$archivo)
+
+# EDA espacial satelital
+print(p_sat[[1]])
+
+
+# Metadatos y ubicaciones
+metadatos_total <- tierra_pentadal %>%
+  distinct(STATION_ID, YEAR, curva) %>%
+  left_join(info_estaciones, by = "STATION_ID") %>%
+  arrange(STATION_ID, YEAR)
+
+estaciones_geo <- metadatos_total %>%
+  filter(!is.na(longitud), !is.na(latitud)) %>%
+  distinct(STATION_ID, longitud, latitud)
+
+if (nrow(estaciones_geo) == 0)
+  stop("No hay estaciones con coordenadas")
+
+puntos <- vect(estaciones_geo,
+               geom = c("longitud", "latitud"),
+               crs = "EPSG:4326")
+
+puntos <- project(puntos, crs(p_sat))
+
+estaciones_geo$pixel_id <- cellFromXY(
+  p_sat[[1]], crds(puntos)
+)
+
+# Extraer precipitacion por pixel
+extraccion <- terra::extract(p_sat, puntos, ID = FALSE)
+
+stopifnot(
+  nrow(extraccion) == nrow(estaciones_geo),
+  ncol(extraccion) == nrow(capas_modelo)
+)
+
+sat_long <- tibble(
+  STATION_ID = rep(estaciones_geo$STATION_ID,
+                   each = nrow(capas_modelo)),
+  YEAR = rep(capas_modelo$YEAR,
+             times = nrow(estaciones_geo)),
+  pentada = rep(capas_modelo$pentada,
+                times = nrow(estaciones_geo)),
+  lluvia_sat_mm = as.vector(t(as.matrix(extraccion)))
+) %>%
+  mutate(curva = paste(STATION_ID, YEAR, sep = "_"))
+
+# EDA satelital sobre pixeles de estaciones
+eda_satelite <- sat_long %>%
+  group_by(YEAR, pentada) %>%
+  summarise(
+    media_mm = mean(lluvia_sat_mm, na.rm = TRUE),
+    mediana_mm = median(lluvia_sat_mm, na.rm = TRUE),
+    cobertura = 100 * mean(!is.na(lluvia_sat_mm)),
+    .groups = "drop"
+  )
+
+print(summary(eda_satelite$media_mm))
+
+
+# Emparejar estaciones y pixeles
+metadatos_total <- metadatos_total %>%
+  left_join(
+    estaciones_geo %>% select(STATION_ID, pixel_id),
+    by = "STATION_ID"
+  )
+
+pixeles_compartidos <- estaciones_geo %>%
+  filter(!is.na(pixel_id)) %>%
+  group_by(pixel_id) %>%
+  summarise(
+    estaciones = n_distinct(STATION_ID),
+    .groups = "drop"
+  ) %>%
+  filter(estaciones > 1)
+
+conteo_sat <- sat_long %>%
+  group_by(curva) %>%
+  summarise(
+    pentadas = n_distinct(pentada),
+    valores_validos = sum(!is.na(lluvia_sat_mm)),
+    .groups = "drop"
+  )
+
+metadatos_total <- metadatos_total %>%
+  left_join(conteo_sat, by = "curva") %>%
+  mutate(
+    estado = case_when(
+      is.na(longitud) | is.na(latitud) ~ "Sin coordenadas",
+      is.na(pixel_id) ~ "Fuera del raster",
+      is.na(pentadas) | pentadas != 72 ~ "Faltan capas",
+      valores_validos != 72 ~ "Pixel incompleto",
+      TRUE ~ "Emparejado"
+    )
+  )
+
+print(metadatos_total %>% count(estado))
+print(pixeles_compartidos)
+
+# Matrices finales alineadas
+curvas_finales <- metadatos_total %>%
+  filter(estado == "Emparejado") %>%
+  pull(curva)
+
+if (length(curvas_finales) == 0)
+  stop("No hay curvas emparejadas")
+
+Y_est <- Y_terrestre_total[, curvas_finales, drop = FALSE]
+
+tabla_X <- sat_long %>%
+  filter(curva %in% curvas_finales) %>%
+  select(pentada, curva, lluvia_sat_mm) %>%
+  pivot_wider(names_from = curva, values_from = lluvia_sat_mm) %>%
+  arrange(pentada)
+
+X_sat <- as.matrix(
+  tabla_X[match(1:72, tabla_X$pentada),
+          curvas_finales, drop = FALSE]
+)
+
+rownames(X_sat) <- as.character(1:72)
+
+metadatos <- metadatos_total %>%
+  filter(curva %in% curvas_finales) %>%
+  slice(match(curvas_finales, curva))
+
+stopifnot(
+  identical(dim(Y_est), dim(X_sat)),
+  identical(colnames(Y_est), colnames(X_sat)),
+  identical(rownames(Y_est), rownames(X_sat)),
+  identical(metadatos$curva, colnames(Y_est)),
+  !anyNA(X_sat)
+)
+
+# EDA comparativo de ambas fuentes
+comparacion <- tibble(
+  pentada = rep(1:72, times = ncol(Y_est)),
+  tierra = as.vector(Y_est),
+  satelite = as.vector(X_sat)
+) %>%
+  filter(!is.na(tierra), !is.na(satelite)) %>%
+  group_by(pentada) %>%
+  summarise(
+    tierra = mean(tierra),
+    satelite = mean(satelite),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(tierra, satelite),
+               names_to = "fuente",
+               values_to = "precipitacion")
+
+print(
+  ggplot(comparacion,
+         aes(pentada, precipitacion, color = fuente)) +
+    geom_line(linewidth = 1) +
+    labs(title = "Precipitacion media por fuente",
+         x = "Pentada", y = "Precipitacion (mm)") +
+    theme_bw()
+)
+
+# Resultados finales
+cat("Matriz terrestre:", dim(Y_est), "\n")
+cat("Matriz satelital:", dim(X_sat), "\n")
+cat("Faltantes terrestres:", sum(is.na(Y_est)), "\n")
+cat("Curvas con altitud:", sum(!is.na(metadatos$altitud)), "\n")
+
+head(Y_est[, 1:min(5, ncol(Y_est)), drop = FALSE])
+head(X_sat[, 1:min(5, ncol(X_sat)), drop = FALSE])
+head(metadatos)
+
+
+# CONSTRUCCION Y VERIFICACION DE MATRICES
+# 1. Dominio temporal: 72 pentadas anuales
+tiempos <- 1:72
+
+# 2. Transponer matrices
+# Filas: curvas estacion-anio
+# Columnas: pentadas
+
+Y_matriz <- t(Y_est)
+X_matriz <- t(X_sat)
+
+colnames(Y_matriz) <- paste0("P", sprintf("%02d", tiempos))
+colnames(X_matriz) <- paste0("P", sprintf("%02d", tiempos))
+
+# 3. Verificar dimensiones
+cat("Dimensiones matriz terrestre:\n")
+print(dim(Y_matriz))
+
+cat("Dimensiones matriz satelital:\n")
+print(dim(X_matriz))
+
+# 4. Verificar correspondencia de curvas
+stopifnot(
+  identical(dim(Y_matriz), dim(X_matriz)),
+  identical(rownames(Y_matriz), rownames(X_matriz)),
+  identical(colnames(Y_matriz), colnames(X_matriz)),
+  ncol(Y_matriz) == length(tiempos),
+  identical(rownames(Y_matriz), metadatos$curva)
+)
+
+# 5. Verificar valores faltantes
+cat("NA terrestres:", sum(is.na(Y_matriz)), "\n")
+cat("NA satelitales:", sum(is.na(X_matriz)), "\n")
+
+# 6. Separar entrenamiento y validacion por anio
+indices_train <- which(
+  metadatos$YEAR >= 1981 & metadatos$YEAR <= 1995
+)
+
+indices_val <- which(
+  metadatos$YEAR >= 1996 & metadatos$YEAR <= 2000
+)
+
+Y_train <- Y_matriz[indices_train, , drop = FALSE]
+X_train <- X_matriz[indices_train, , drop = FALSE]
+
+Y_val <- Y_matriz[indices_val, , drop = FALSE]
+X_val <- X_matriz[indices_val, , drop = FALSE]
+
+# 7. Verificar separacion temporal
+stopifnot(
+  all(metadatos$YEAR[indices_train] <= 1995),
+  all(metadatos$YEAR[indices_val] >= 1996),
+  length(intersect(indices_train, indices_val)) == 0,
+  nrow(Y_train) == nrow(X_train),
+  nrow(Y_val) == nrow(X_val)
+)
+
+# 8. Resumen
+cat("\nRESUMEN DE MATRICES\n")
+cat("Curvas totales:", nrow(Y_matriz), "\n")
+cat("Pentadas:", ncol(Y_matriz), "\n")
+cat("Curvas entrenamiento:", nrow(Y_train), "\n")
+cat("Curvas validacion:", nrow(Y_val), "\n")
+cat("Faltantes terrestres:", sum(is.na(Y_matriz)), "\n")
+
+# 9. Guardar resultados en formato RDS
+dir.create("Resultados", showWarnings = FALSE)
+
+saveRDS(
+  list(
+    tiempos = tiempos,
+    Y_matriz = Y_matriz,
+    X_matriz = X_matriz,
+    metadatos = metadatos,
+    Y_train = Y_train,
+    X_train = X_train,
+    Y_val = Y_val,
+    X_val = X_val
+  ),
+  "Resultados/matrices_funcionales.rds"
+)
+
+cat("Matrices guardadas en Resultados/matrices_funcionales.rds\n")
+
+
+matrices <- readRDS("Resultados/matrices_funcionales.rds")
+
+Y_matriz <- matrices$Y_matriz
+X_matriz <- matrices$X_matriz
+metadatos <- matrices$metadatos
+
+
+# DIAGNOSTICO DE VALORES FALTANTES EN LAS MATRICES
+# Verificar alineacion
+stopifnot(
+  identical(dim(Y_matriz), dim(X_matriz)),
+  identical(rownames(Y_matriz), rownames(X_matriz)),
+  identical(rownames(Y_matriz), metadatos$curva),
+  ncol(Y_matriz) == 72
+)
+
+# Contar valores faltantes por curva
+faltantes_curva <- rowSums(is.na(Y_matriz))
+observados_curva <- rowSums(!is.na(Y_matriz))
+
+# Resumen general
+diagnostico_faltantes <- data.frame(
+  indicador = c(
+    "Total de curvas",
+    "Curvas completas",
+    "Curvas con al menos un NA",
+    "Total de valores NA",
+    "Maximo de NA en una curva",
+    "Minimo de pentadas observadas",
+    "NA satelitales"
+  ),
+  cantidad = c(
+    nrow(Y_matriz),
+    sum(faltantes_curva == 0),
+    sum(faltantes_curva > 0),
+    sum(faltantes_curva),
+    max(faltantes_curva),
+    min(observados_curva),
+    sum(is.na(X_matriz))
+  )
+)
+
+print(diagnostico_faltantes)
+
+# Distribucion de valores faltantes por curva
+print(table(faltantes_curva))
+
+# Curvas afectadas y sus respectivos anios
+curvas_con_na <- metadatos %>%
+  mutate(
+    pentadas_observadas = observados_curva,
+    pentadas_faltantes = faltantes_curva
+  ) %>%
+  filter(pentadas_faltantes > 0) %>%
+  arrange(desc(pentadas_faltantes))
+
+print(
+  curvas_con_na %>%
+    select(
+      STATION_ID, YEAR, curva,
+      pentadas_observadas, pentadas_faltantes
+    ),
+  n = Inf
+)
+
+
+# SUFICIENCIA DE OBSERVACIONES PARA MINIMOS CUADRADOS
+K_evaluar <- c(6, 8, 10, 12, 15, 20, 25, 30)
+
+suficiencia_K <- data.frame(
+  K = K_evaluar,
+  curvas_con_n_mayor_igual_K = sapply(
+    K_evaluar,
+    function(k) sum(observados_curva >= k)
+  ),
+  curvas_con_n_menor_K = sapply(
+    K_evaluar,
+    function(k) sum(observados_curva < k)
+  ),
+  minimo_observado = min(observados_curva)
+)
+
+print(suficiencia_K)
+
+
+# VERIFICACION DEL RANGO DE LA MATRIZ B-SPLINE
+# 1. Dominio y valores candidatos
+tiempos <- 1:72
+K_evaluar <- c(6, 8, 10, 12, 15, 20, 25, 30)
+orden <- 4  # B-splines cubicas
+
+# 2. CONSTRUCCION MANUAL DE LA MATRIZ B-SPLINE
+# Recurrencia de Cox-de Boor
+
+
+construir_bspline <- function(t, K, orden = 4) {
+
+if (K < orden) {
+  stop("K debe ser mayor o igual al orden.")
+}
+
+a <- min(tiempos)
+b <- max(tiempos)
+
+# Nodos interiores equiespaciados
+n_internos <- K - orden
+
+internos <- if (n_internos > 0) {
+  seq(a, b, length.out = n_internos + 2)[
+    2:(n_internos + 1)
+  ]
+} else {
+  numeric(0)
+}
+
+# Vector de nodos con extremos repetidos
+nodos <- c(
+  rep(a, orden),
+  internos,
+  rep(b, orden)
+)
+
+# Bases de orden 1
+N <- matrix(
+  0,
+  nrow = length(t),
+  ncol = length(nodos) - 1
+)
+
+for (j in seq_len(ncol(N))) {
+  N[, j] <- as.numeric(
+    t >= nodos[j] & t < nodos[j + 1]
+  )
+}
+
+# Recurrencia hasta el orden solicitado
+for (d in 2:orden) {
+  
+  N_nuevo <- matrix(
+    0,
+    nrow = length(t),
+    ncol = ncol(N) - 1
+  )
+  
+  for (j in seq_len(ncol(N_nuevo))) {
+    
+    den1 <- nodos[j + d - 1] - nodos[j]
+    den2 <- nodos[j + d] - nodos[j + 1]
+    
+    if (den1 > 0) {
+      N_nuevo[, j] <- N_nuevo[, j] +
+        ((t - nodos[j]) / den1) * N[, j]
+    }
+    
+    if (den2 > 0) {
+      N_nuevo[, j] <- N_nuevo[, j] +
+        ((nodos[j + d] - t) / den2) * N[, j + 1]
+    }
+  }
+  
+  N <- N_nuevo
+}
+
+# Incluir el extremo derecho del dominio
+N[t == b, ] <- 0
+N[t == b, K] <- 1
+
+colnames(N) <- paste0("B", seq_len(K))
+
+return(N)
+}
+
+# 3. COMPROBAR LA BASE COMPLETA
+Phi_ejemplo <- construir_bspline(
+  tiempos,
+  K = 12,
+  orden = orden
+)
+
+cat("Dimensiones de Phi:\n")
+print(dim(Phi_ejemplo))
+
+cat("Rango de Phi completa:\n")
+print(qr(Phi_ejemplo, tol = 1e-9)$rank)
+
+# Verificar particion de la unidad
+stopifnot(
+  ncol(Phi_ejemplo) == 12,
+  all(abs(rowSums(Phi_ejemplo) - 1) < 1e-8)
+)
+
+# 4. RANGO POR CURVA, USANDO SOLO PENTADAS OBSERVADAS
+resultados_rango <- list()
+
+for (K in K_evaluar) {
+  
+  Phi <- construir_bspline(
+    tiempos,
+    K = K,
+    orden = orden
+  )
+  
+  rangos <- integer(nrow(Y_matriz))
+  
+  for (i in seq_len(nrow(Y_matriz))) {
+    
+    observados <- which(!is.na(Y_matriz[i, ]))
+    
+    Phi_i <- Phi[observados, , drop = FALSE]
+    
+    rangos[i] <- qr(
+      Phi_i,
+      tol = 1e-9
+    )$rank
+  }
+  
+  resultados_rango[[as.character(K)]] <- data.frame(
+    curva = rownames(Y_matriz),
+    K = K,
+    n_observados = rowSums(!is.na(Y_matriz)),
+    rango = rangos,
+    rango_completo = rangos == K
+  )
+}
+
+resultados_rango <- dplyr::bind_rows(
+  resultados_rango
+)
+
+# 5. RESUMEN GENERAL
+resumen_rango <- resultados_rango %>%
+  dplyr::group_by(K) %>%
+  dplyr::summarise(
+    curvas_evaluadas = dplyr::n(),
+    rango_completo = sum(rango_completo),
+    rango_incompleto = sum(!rango_completo),
+    rango_minimo = min(rango),
+    .groups = "drop"
+  )
+
+print(resumen_rango)
+
+# 6. IDENTIFICAR CURVAS PROBLEMATICAS
+curvas_rango_incompleto <- resultados_rango %>%
+  dplyr::filter(!rango_completo) %>%
+  dplyr::arrange(K, rango)
+
+cat("Casos con rango incompleto:",
+    nrow(curvas_rango_incompleto), "\n")
+
+print(
+  tibble::as_tibble(curvas_rango_incompleto),
+  n = Inf
+)
+
+# 7. VERIFICACION FINAL
+if (all(resultados_rango$rango_completo)) {
+  
+  cat(
+    "\nTodas las curvas tienen rango completo",
+    "para los valores de K evaluados.\n"
+  )
+  
+} else {
+  
+  cat(
+    "\nExisten curvas con rango incompleto.",
+    "Revisar resultados antes del ajuste.\n"
+  )
+}
+
+
+# DIAGNOSTICO DE LA CURVA CON RANGO INCOMPLETO
+curva_revision <- "5301400104_1988"
+
+# Localizar la curva
+i <- match(curva_revision, rownames(Y_matriz))
+
+stopifnot(!is.na(i))
+
+# Identificar pentadas observadas y faltantes
+observadas <- which(!is.na(Y_matriz[i, ]))
+faltantes <- which(is.na(Y_matriz[i, ]))
+
+cat("Pentadas faltantes:\n")
+print(faltantes)
+
+# Comparar rangos y condicionamiento
+diagnostico_rango <- lapply(c(12, 15, 20, 25, 30), function(K) {
+  
+  Phi <- construir_bspline(
+    tiempos,
+    K = K,
+    orden = 4
+  )
+  
+  Phi_i <- Phi[observadas, , drop = FALSE]
+  
+  data.frame(
+    K = K,
+    observaciones = nrow(Phi_i),
+    rango = qr(Phi_i, tol = 1e-9)$rank,
+    columnas_nulas = sum(colSums(abs(Phi_i)) < 1e-10),
+    condicion = kappa(Phi_i, exact = TRUE)
+  )
+})
+
+diagnostico_rango <- dplyr::bind_rows(diagnostico_rango)
+
+print(diagnostico_rango)
+
+# Verificacion global de los conteos
+resultados_rango %>%
+  dplyr::group_by(K) %>%
+  dplyr::summarise(
+    completas = sum(rango_completo, na.rm = TRUE),
+    incompletas = sum(rango_completo == FALSE, na.rm = TRUE),
+    sin_clasificar = sum(is.na(rango_completo)),
+    .groups = "drop"
+  ) %>%
+  print()
