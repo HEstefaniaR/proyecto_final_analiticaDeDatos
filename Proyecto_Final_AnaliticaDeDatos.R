@@ -294,6 +294,81 @@ cat("Estaciones antes:", length(unique(cobertura$STATION_ID)),
     "| despues:", length(unique(cobertura$STATION_ID[cobertura$apto])), "\n")
 
 
+##### Tabla ONI #####
+
+tabla_oni <- read_excel("data/ONI_1981_2003.xlsx")
+names(tabla_oni)[-1] <- c("DEF", "EFM", "FMA", "MAM", "AMJ", "MJJ",
+                         "JJA", "JAS", "ASO", "SON", "OND", "NDE")
+
+# Ventanas trimestrales ordenadas por su mes central. Ejemplo: DEF = enero, NDE = diciembre
+ventanas_oni <- names(tabla_oni)[-1]
+oni_temporal <- data.frame(
+  YEAR = rep(tabla_oni$Year, each = length(ventanas_oni)),
+  mes_central = rep(seq_along(ventanas_oni), times = nrow(tabla_oni)),
+  ventana = rep(ventanas_oni, times = nrow(tabla_oni)),
+  ONI = as.vector(t(as.matrix(tabla_oni[, -1])))
+) %>%
+  arrange(YEAR, mes_central) %>%
+  mutate(fase_umbral = case_when(
+    ONI >= 0.5 ~ "El Niño",
+    ONI <= -0.5 ~ "La Niña",
+    TRUE ~ "Neutral"
+  ))
+
+# Rachas continuas entre años, sin reiniciar el conteo en enero
+rachas_oni <- rle(oni_temporal$fase_umbral)
+oni_temporal$racha <- rep(seq_along(rachas_oni$lengths), rachas_oni$lengths)
+oni_temporal$ventanas_racha <- rep(rachas_oni$lengths, rachas_oni$lengths)
+
+# Criterio histórico NOAA - al menos 5 ventanas consecutivas del mismo signo
+oni_temporal <- oni_temporal %>%
+  mutate(fase_enso = ifelse(ventanas_racha >= 5, fase_umbral, "Neutral"))
+
+# Inicio y fin expresados como ventanas trimestrales
+episodios_enso <- oni_temporal %>%
+  filter(fase_enso != "Neutral") %>%
+  group_by(racha, fase_enso) %>%
+  summarise(inicio = paste(first(ventana), first(YEAR)),
+            fin = paste(last(ventana), last(YEAR)),
+            ventanas = n(),
+            .groups = "drop") %>%
+  mutate(episodio = row_number()) %>%
+  select(episodio, fase_enso, inicio, fin, ventanas)
+
+# Fases dentro de cada año, asignadas por el mes central de cada ventana
+enso_anual <- oni_temporal %>%
+  group_by(YEAR) %>%
+  summarise(ventanas_nino = sum(fase_enso == "El Niño"),
+            ventanas_nina = sum(fase_enso == "La Niña"),
+            ventanas_neutral = sum(fase_enso == "Neutral"),
+            secuencia_fases = paste(rle(fase_enso)$values, collapse = "-> "),
+            cambio_fase = n_distinct(fase_enso) > 1,
+            nino_y_nina = ventanas_nino > 0 & ventanas_nina > 0,
+            .groups = "drop")
+
+anios_cambio_fase <- enso_anual %>% filter(cambio_fase)
+
+# Resúmenes anuales de ONI para comparar como entradas del modelo
+oni_anual <- oni_temporal %>%
+  group_by(YEAR) %>%
+  summarise(oni_promedio = mean(ONI),
+            oni_max_intensidad = ONI[which.max(abs(ONI))],
+            .groups = "drop")
+print(oni_anual, n=Inf)
+
+# Fase ENSO por año y mes central para evaluar tramos de las curvas
+enso_evaluacion <- oni_temporal %>%
+  select(YEAR, mes_central, ventana, ONI, fase_enso)
+
+head(enso_evaluacion, n=12)
+
+write.csv(oni_anual, "data/oni_anual.csv", row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(enso_evaluacion, "data/enso_evaluacion.csv", row.names = FALSE, fileEncoding = "UTF-8")
+
+print(episodios_enso, n = Inf)
+print(enso_anual, n = Inf, width = Inf)
+
+
 ##### Conjunto de prueba #####
 # Se aplican las mismas reglas con los mismos umbrales.
 # Los ceros falsos no se aplican porque esos meses se eligieron caso por caso.
