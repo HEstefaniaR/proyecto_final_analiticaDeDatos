@@ -18,7 +18,6 @@ set.seed(2026)
 
 ##### Directorio de trabajo #####
 rm(list = ls())
-dir.create("Figuras", showWarnings = FALSE)
 dir.create("Resultados", showWarnings = FALSE)
 
 ##### Carga de datos #####
@@ -1081,4 +1080,205 @@ min(ajustes_satelite)
 
 
 
+
+##### Varianza y bandas #####
+# Varianza residual de referencia MCO
+residuos_referencia <- list(terrestre = residuos_estaciones, satelital = residuos_satelite)
+bases_referencia <- list(terrestre = Phi_estaciones, satelital = Phi_satelite)
+varianza_residual_MCO <- list()
+
+# SCE / (n - K) por curva con rango completo y grados de libertad positivos
+for (fuente in names(fuentes)) {
+  datos <- fuentes[[fuente]]
+  R_mco <- residuos_referencia[[fuente]]
+  Phi_ref <- bases_referencia[[fuente]]
+  n_obs <- rowSums(!is.na(datos))
+  K_ref <- ncol(Phi_ref)
+  gl_residual <- n_obs - K_ref
+  SSE <- rowSums(R_mco^2, na.rm = TRUE)
+  aptas <- gl_residual > 0 & rowSums(is.finite(R_mco)) == n_obs
+  for (i in which(aptas)) {
+    obs <- !is.na(datos[i, ])
+    aptas[i] <- qr(Phi_ref[obs, , drop = FALSE], tol = 1e-9)$rank == K_ref
+  }
+
+  gl_residual[!aptas] <- NA_integer_
+  SSE[!aptas] <- NA_real_
+  sigma2 <- SSE / gl_residual
+  varianza_residual_MCO[[fuente]] <- data.frame(curva = rownames(datos), n_obs, K = K_ref,
+                                              gl_residual, SSE, sigma2)
+  cat(fuente, "- estimaciones de sigma^2:", sum(aptas), "de", length(aptas), "curvas\n")
+  print(summary(sigma2))
+}
+
+
+# Mapa de coeficientes y covarianza del MCP
+mapas_MCP <- list()
+for (fuente in names(fuentes)) {
+  datos_mcp <- fuentes[[fuente]]
+  Phi_mcp <- bases_referencia[[fuente]]
+  R_mcp <- residuos_referencia[[fuente]]
+
+  # Diagonal de Sigma estimada con el segundo momento residual por pentada
+  varianzas_mcp <- apply(R_mcp^2, 2, mean, na.rm = TRUE)
+  n_residuos_mcp <- colSums(is.finite(R_mcp))
+  pesos_mcp <- 1 / varianzas_mcp
+  pesos_validos <- is.finite(pesos_mcp) & pesos_mcp > 0
+  varianzas_mcp[!pesos_validos] <- NA_real_
+  pesos_mcp[!pesos_validos] <- NA_real_
+  Sigma_mcp <- diag(varianzas_mcp)
+
+  curvas_mcp <- vector("list", nrow(datos_mcp))
+  names(curvas_mcp) <- rownames(datos_mcp)
+  for (i in seq_len(nrow(datos_mcp))) {
+    obs <- which(!is.na(datos_mcp[i, ]))
+    if (length(obs) < ncol(Phi_mcp) || any(!pesos_validos[obs])) next
+    P <- Phi_mcp[obs, , drop = FALSE]
+    if (qr(P, tol = 1e-9)$rank < ncol(Phi_mcp)) next
+
+    # C = (P' W P)^-1 P' W sobre las pentadas observadas
+    PW <- t(P * pesos_mcp[obs])
+    C_mcp <- solve(PW %*% P, PW)
+    curvas_mcp[[i]] <- list(obs = obs, C = C_mcp, varianzas_obs = varianzas_mcp[obs])
+  }
+
+  mapas_MCP[[fuente]] <- list(Phi = Phi_mcp, pesos = pesos_mcp, Sigma = Sigma_mcp,
+                             n_residuos = n_residuos_mcp, curvas = curvas_mcp)
+  cat(fuente, "- mapas C:", sum(lengths(curvas_mcp) > 0), "de", length(curvas_mcp),
+      "curvas | pentadas sin peso:", sum(!pesos_validos), "\n")
+}
+
+
+# Distribucion de la varianza residual de referencia por fuente
+varianzas_grafico <- lapply(varianza_residual_MCO, function(tabla) {
+  tabla$sigma2[is.finite(tabla$sigma2) & tabla$sigma2 > 0]
+})
+if (any(lengths(varianzas_grafico) > 0)) {
+  boxplot(varianzas_grafico, names = c("Estaciones", "Satélite"), log = "y",
+          col = c("lightblue", "moccasin"),
+          main = "Varianza residual por fuente", ylab = "Varianza (mm², escala log)")
+}
+
+# Comparacion de las varianzas para la misma curva estacion-año
+varianzas_pares <- merge(varianza_residual_MCO$terrestre[, c("curva", "sigma2")],
+                         varianza_residual_MCO$satelital[, c("curva", "sigma2")],
+                         by = "curva", suffixes = c("_terrestre", "_satelital"))
+pares_positivos <- with(varianzas_pares, is.finite(sigma2_terrestre) & sigma2_terrestre > 0 &
+                          is.finite(sigma2_satelital) & sigma2_satelital > 0)
+varianzas_pares <- varianzas_pares[pares_positivos, ]
+
+if (nrow(varianzas_pares) > 0) {
+  limites_varianza <- range(varianzas_pares$sigma2_terrestre, varianzas_pares$sigma2_satelital)
+  plot(varianzas_pares$sigma2_terrestre, varianzas_pares$sigma2_satelital,
+       log = "xy", xlim = limites_varianza, ylim = limites_varianza, pch = 16, cex = 0.7,
+       col = "steelblue",
+       main = "Varianza residual por par estación-satélite",
+       xlab = "Estaciones (mm², escala log)", ylab = "Satélite (mm², escala log)")
+  abline(0, 1, lty = 2, col = "darkorange")
+}
+
+
+# Varianza de la curva ajustada con MCP en cada pentada
+varianza_curvas_MCP <- list()
+for (fuente in names(mapas_MCP)) {
+  mapa <- mapas_MCP[[fuente]]
+  datos_mcp <- fuentes[[fuente]]
+  varianzas_curvas <- matrix(NA_real_, nrow(datos_mcp), ncol(datos_mcp),
+                             dimnames = dimnames(datos_mcp))
+
+  for (i in which(lengths(mapa$curvas) > 0)) {
+    curva <- mapa$curvas[[i]]
+    Phi_C <- mapa$Phi %*% curva$C
+    # Diagonal de Phi C Sigma C' Phi' cuando Sigma es diagonal
+    varianzas_curvas[i, ] <- Phi_C^2 %*% curva$varianzas_obs
+  }
+
+  varianza_curvas_MCP[[fuente]] <- varianzas_curvas
+}
+
+
+# Gráficos Q-Q de los residuos MCP en las péntadas 2, 40 y 60
+residuos_MCP <- list(terrestre = Y_train - ajustes_estaciones,
+                     satelital = X_train - ajustes_satelite)
+colores_bandas <- c(terrestre = "steelblue", satelital = "darkorange")
+etiquetas_bandas <- c(terrestre = "Estación", satelital = "Satélite")
+pentadas_QQ <- c(2, 40, 60)
+par_QQ <- par(mfrow = c(2, 3))
+for (fuente in names(residuos_MCP)) {
+  for (j in pentadas_QQ) {
+    residuos_pentada <- residuos_MCP[[fuente]][, j]
+    qqnorm(residuos_pentada, pch = 16, cex = 0.5,
+           main = paste(etiquetas_bandas[[fuente]], "- Péntada", j),
+           xlab = "Cuantiles normales", ylab = "Residuos MCP (mm)")
+    qqline(residuos_pentada, col = colores_bandas[[fuente]], lwd = 2)
+  }
+}
+par(par_QQ)
+
+
+# Comparación de pares estación-año para las bandas
+tabla_pares_bandas <- data.frame(
+  curva = rownames(Y_train),
+  observadas_tierra = rowSums(!is.na(Y_train)),
+  observadas_satelite = rowSums(!is.na(X_train)),
+  acumulado_tierra = rowSums(ajustes_estaciones),
+  acumulado_satelite = rowSums(ajustes_satelite),
+  RMSE_tierra = sqrt(rowMeans((Y_train - ajustes_estaciones)^2, na.rm = TRUE))
+)
+
+# Distancia al percentil 50 del acumulado ajustado en las dos fuentes
+tabla_pares_bandas$percentil_tierra <- 100 * (rank(tabla_pares_bandas$acumulado_tierra) - 0.5) /
+  nrow(tabla_pares_bandas)
+tabla_pares_bandas$percentil_satelite <- 100 * (rank(tabla_pares_bandas$acumulado_satelite) - 0.5) /
+  nrow(tabla_pares_bandas)
+tabla_pares_bandas$distancia_mediana <- abs(tabla_pares_bandas$percentil_tierra - 50) +
+  abs(tabla_pares_bandas$percentil_satelite - 50)
+
+orden_central <- order(tabla_pares_bandas$distancia_mediana, tabla_pares_bandas$curva)
+orden_RMSE <- order(-tabla_pares_bandas$RMSE_tierra, tabla_pares_bandas$curva)
+cat("Pares más cercanos a las dos medianas\n")
+print(head(tabla_pares_bandas[orden_central, ], 5), row.names = FALSE)
+cat("Pares con mayor RMSE terrestre (mm)\n")
+print(head(tabla_pares_bandas[orden_RMSE, ], 5), row.names = FALSE)
+
+
+# Bandas punto a punto para los pares elegidos manualmente
+curvas_bandas <- c("2610000111_1989", "5421200110_1982")
+ajustes_bandas <- list(terrestre = ajustes_estaciones, satelital = ajustes_satelite)
+
+# Multiplicador de referencia para visualizar la incertidumbre del ajuste
+multiplicador_bandas <- 2
+
+bandas_MCP <- list()
+for (curva_bandas in curvas_bandas) {
+  par_bandas <- match(curva_bandas, tabla_pares_bandas$curva)
+  bandas_par <- list()
+  for (fuente in names(ajustes_bandas)) {
+    ajuste_banda <- ajustes_bandas[[fuente]][par_bandas, ]
+    EE_banda <- sqrt(varianza_curvas_MCP[[fuente]][par_bandas, ])
+    bandas_par[[fuente]] <- data.frame(
+      observado = fuentes[[fuente]][par_bandas, ],
+      ajuste = ajuste_banda,
+      inferior = ajuste_banda - multiplicador_bandas * EE_banda,
+      superior = ajuste_banda + multiplicador_bandas * EE_banda
+    )
+  }
+  bandas_MCP[[curva_bandas]] <- bandas_par
+  limites_bandas <- range(bandas_par$terrestre, bandas_par$satelital, na.rm = TRUE)
+  par_bandas_anterior <- par(mfrow = c(1, 2))
+  for (fuente in names(bandas_par)) {
+    banda <- bandas_par[[fuente]]
+    color <- colores_bandas[[fuente]]
+    plot(tiempos, banda$observado, pch = 16, cex = 0.65, ylim = limites_bandas,
+         xlab = "Péntada", ylab = "Precipitación (mm)",
+         main = paste(etiquetas_bandas[[fuente]], curva_bandas))
+    lines(tiempos, banda$ajuste, col = color, lwd = 2)
+    lines(tiempos, banda$inferior, col = color, lty = 2)
+    lines(tiempos, banda$superior, col = color, lty = 2)
+    legend("topright", c("Observado", "Ajuste MCP", paste("Referencia ±", multiplicador_bandas, "EE")),
+           col = c("black", color, color), pch = c(16, NA, NA),
+           lty = c(NA, 1, 2), bty = "n", cex = 0.8)
+  }
+  par(par_bandas_anterior)
+}
 
