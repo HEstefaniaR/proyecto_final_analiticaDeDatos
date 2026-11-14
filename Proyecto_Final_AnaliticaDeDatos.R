@@ -33,9 +33,23 @@ p_tierra <- p_tierra[order(p_tierra$STATION_ID, p_tierra$fecha), ]
 # Verificar duplicados estacion-fecha
 sum(duplicated(p_tierra[, c("STATION_ID", "fecha")]))
 
+# Conteo de registros validos, estaciones y pares estacion-año en cada paso del preprocesamiento
+contar <- function(datos, paso) {
+  validos <- datos[!is.na(datos$VALUE), ]
+  data.frame(paso = paso, registros = nrow(validos),
+             estaciones = length(unique(validos$STATION_ID)),
+             pares_estacion_anio = nrow(unique(validos[, c("STATION_ID", "YEAR")])))
+}
+
+trazabilidad_pasos <- contar(p_tierra, "Datos 1981-2003")
+
+
 # Separar datos
 p_prueba <- p_tierra[p_tierra$YEAR >= 2001, ]
 p_tierra <- p_tierra[p_tierra$YEAR <= 2000, ]
+
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_tierra, "Sin el conjunto de prueba (1981-2000)"))
+trazabilidad_prueba <- contar(p_prueba, "Datos 2001-2003")
 
 # Coordenadas y altitud de las estaciones
 coord <- read.csv("data/CVC_Wheather_Stations_Long_Lat.csv", fileEncoding = "latin1")
@@ -102,6 +116,7 @@ data.frame(p_tierra[error, c("STATION_ID", "YEAR", "MONTH", "DAY")],
 
 p_tierra$VALUE[error] <- NA
 
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_tierra, "Errores aislados"))
 
 ##### Acumulados mensuales #####
 p_m <- p_tierra
@@ -147,6 +162,7 @@ length(acumulados)
 p_m_depurado <- p_m
 p_m_depurado$VALUE[acumulados] <- NA
 
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_m_depurado, "Acumulados mensuales"))
 
 ##### Ceros falsos #####
 # Meses con muchos ceros y un pico al final del mes
@@ -223,6 +239,7 @@ length(ceros_falsos)
 
 p_m_depurado$VALUE[ceros_falsos] <- NA
 
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_m_depurado, "Ceros falsos"))
 
 ##### Trazabilidad #####
 trazabilidad <- rbind(data.frame(p_m[acumulados, c("STATION_ID", "fecha", "VALUE")],
@@ -230,18 +247,6 @@ trazabilidad <- rbind(data.frame(p_m[acumulados, c("STATION_ID", "fecha", "VALUE
                       data.frame(p_m[ceros_falsos, c("STATION_ID", "fecha", "VALUE")],
                                  motivo = "Mes con ceros sospechosos"))
 trazabilidad
-
-comparacion_M <- data.frame(
-  etapa = c("Antes de depurar acumulados mensuales y ceros sospechosos",
-            "Despues de depurar acumulados mensuales y ceros sospechosos"),
-  registros = c(nrow(p_m), nrow(p_m_depurado)),
-  validos = c(sum(!is.na(p_m$VALUE)), sum(!is.na(p_m_depurado$VALUE))),
-  estaciones = c(length(unique(p_m$STATION_ID[!is.na(p_m$VALUE)])),
-                 length(unique(p_m_depurado$STATION_ID[!is.na(p_m_depurado$VALUE)]))),
-  pares_estacion_anio = c(nrow(unique(p_m[!is.na(p_m$VALUE), c("STATION_ID", "YEAR")])),
-                          nrow(unique(p_m_depurado[!is.na(p_m_depurado$VALUE), c("STATION_ID", "YEAR")]))))
-comparacion_M
-
 
 ##### Dias faltantes y años incompletos #####
 # Racha mas larga de dias faltantes (como en el script de ANOVA funcional)
@@ -288,6 +293,11 @@ for (u in c(0.85, 0.90, 0.95)) {
 # Criterio: cobertura >= 95 %, hueco mas largo y borde de maximo 7 dias
 cobertura$apto <- cobertura$cobertura >= 0.95 & cobertura$hueco <= 7 & cobertura$borde <= 7
 
+trazabilidad_pasos <- rbind(trazabilidad_pasos, 
+                            contar(p_m_depurado[paste(p_m_depurado$STATION_ID, 
+                                                      p_m_depurado$YEAR) %in% 
+                                                  paste(cobertura$STATION_ID, cobertura$YEAR)[cobertura$apto], ], "Cobertura minima"))
+
 cat("Pares estacion-año antes:", nrow(cobertura), "| aptos:", sum(cobertura$apto), "\n")
 cat("Estaciones antes:", length(unique(cobertura$STATION_ID)),
     "| despues:", length(unique(cobertura$STATION_ID[cobertura$apto])), "\n")
@@ -297,7 +307,7 @@ cat("Estaciones antes:", length(unique(cobertura$STATION_ID)),
 
 tabla_oni <- read_excel("data/ONI_1981_2003.xlsx")
 names(tabla_oni)[-1] <- c("DEF", "EFM", "FMA", "MAM", "AMJ", "MJJ",
-                         "JJA", "JAS", "ASO", "SON", "OND", "NDE")
+                          "JJA", "JAS", "ASO", "SON", "OND", "NDE")
 
 # Ventanas trimestrales ordenadas por su mes central. Ejemplo: DEF = enero, NDE = diciembre
 ventanas_oni <- names(tabla_oni)[-1]
@@ -383,6 +393,8 @@ error_prueba <- which(p_prueba$VALUE > 400 & p_prueba$VALUE > 5 * vecino_max & !
 p_prueba[error_prueba, c("STATION_ID", "YEAR", "MONTH", "DAY", "VALUE")]
 p_prueba$VALUE[error_prueba] <- NA
 
+trazabilidad_prueba <- rbind(trazabilidad_prueba, contar(p_prueba, "Errores aislados"))
+
 # Acumulados mensuales
 resumen_prueba <- p_prueba %>%
   group_by(STATION_ID, YEAR, MONTH) %>%
@@ -397,6 +409,9 @@ acumulados_prueba <- which(p_prueba$fin_mes & !is.na(p_prueba$VALUE) &
                              paste(candidatos_prueba$STATION_ID, candidatos_prueba$YEAR, candidatos_prueba$MONTH))
 length(acumulados_prueba)
 p_prueba$VALUE[acumulados_prueba] <- NA
+
+trazabilidad_prueba <- rbind(trazabilidad_prueba, 
+                             contar(p_prueba, "Acumulados mensuales"))
 
 # Cobertura
 fechas_prueba <- data.frame(fecha = seq(as.Date("2001-01-01"), as.Date("2003-12-31"), by = "day"))
@@ -416,10 +431,15 @@ cobertura_prueba <- calendario_prueba %>%
 
 cobertura_prueba$apto <- cobertura_prueba$cobertura >= 0.95 & cobertura_prueba$hueco <= 7 & cobertura_prueba$borde <= 7
 
+trazabilidad_prueba <- rbind(trazabilidad_prueba, 
+                             contar(p_prueba[paste(p_prueba$STATION_ID, 
+                                                   p_prueba$YEAR) %in% 
+                                               paste(cobertura_prueba$STATION_ID, 
+                                                     cobertura_prueba$YEAR)[cobertura_prueba$apto], ], "Cobertura minima"))
+
 cat("Prueba - errores:", length(error_prueba), "| acumulados:", length(acumulados_prueba),
     "| pares antes:", nrow(cobertura_prueba), "| pares aptos:", sum(cobertura_prueba$apto),
     "| estaciones aptas:", length(unique(cobertura_prueba$STATION_ID[cobertura_prueba$apto])), "\n")
-
 
 ##### Pentadas de las estaciones #####
 # Datos diarios de los pares aptos (con los dias faltantes como NA)
@@ -481,6 +501,12 @@ table(estaciones$pixel)[table(estaciones$pixel) > 1]
 
 # Matrices alineadas: filas = pentadas, columnas = curvas emparejadas
 metadatos <- curvas[curvas$estado == "Emparejado", ]
+
+# Trazabilidad
+trazabilidad_pasos <- rbind(trazabilidad_pasos,
+                            contar(datos_tierra[datos_tierra$curva %in% metadatos$curva, ], "Emparejamiento estacion-pixel"))
+trazabilidad_pasos
+trazabilidad_prueba
 
 Y_est <- Y_terrestre_total[, metadatos$curva]
 X_sat <- matrix(NA, 72, nrow(metadatos), dimnames = list(1:72, metadatos$curva))
@@ -615,306 +641,6 @@ y2cMap <- solve(t(Phi) %*% Phi) %*% t(Phi)
 S <- Phi %*% y2cMap
 c_est <- y2cMap %*% y
 
-max(abs(S - t(S)))         # simetrica
-max(abs(S %*% S - S))      # idempotente
-sum(diag(S))               # traza = K
-
-# Comparacion con smooth.basis
-BasePrec <- create.bspline.basis(c(1, 72), nbasis = 12, norder = 4)
-ajuste_fda <- smooth.basis(tiempos, y, BasePrec)
-max(abs(c_est - ajuste_fda$fd$coefs))
-
-y_sat <- X_train[which(rowSums(is.na(X_train)) == 0)[1], ]
-max(abs(y2cMap %*% y_sat - smooth.basis(tiempos, y_sat, BasePrec)$fd$coefs))
-
-# Grafica: efecto del numero de bases
-par(mfrow = c(1, 2))
-for (fuente in names(fuentes)) {
-  plot(tiempos, fuentes[[fuente]][i, ], pch = 16, cex = 0.5,
-       xlab = "Pentada", ylab = "Precipitacion (mm)", main = paste("Ajuste MCO -", fuente))
-  lines(tiempos, resultados_MCO[[fuente]][["6"]]$predicciones[i, ], col = 2, lwd = 2)
-  lines(tiempos, resultados_MCO[[fuente]][["12"]]$predicciones[i, ], col = 3, lwd = 2)
-  lines(tiempos, resultados_MCO[[fuente]][["20"]]$predicciones[i, ], col = 4, lwd = 2)
-  legend("topright", legend = c("K = 6", "K = 12", "K = 20"), col = 2:4, lty = 1, bty = "n")
-}
-par(mfrow = c(1, 1))
-
-
-##### Diagnostico de residuos de MCO #####
-# MCO supone residuos independientes y con varianza constante (Var[y] = sigma^2 I).
-# Si los residuos muestran heterocedasticidad o correlacion, MCO no es adecuado
-# y se justifica usar MCP o MCG.
-
-# Varianza residual en temporada lluviosa frente al resto del año
-lluviosas <- c(13:30, 49:66)
-for (fuente in names(fuentes)) {
-  for (K in c(6, 12, 20)) {
-    R <- resultados_MCO[[fuente]][[as.character(K)]]$residuos
-    v_lluviosa <- apply(R[, lluviosas], 1, var, na.rm = TRUE)
-    v_otra <- apply(R[, -lluviosas], 1, var, na.rm = TRUE)
-    razon <- (v_lluviosa / v_otra)[which(v_otra > 0)]
-    cat(fuente, "- K =", K, "- razon mediana de varianzas:", round(median(razon), 3),
-        "- % de curvas con mas varianza en temporada lluviosa:", round(100 * mean(razon > 1), 1), "\n")
-  }
-}
-
-# Graficas de varianza y correlacion residual (K = 12)
-par(mfrow = c(2, 2))
-for (fuente in names(fuentes)) {
-  R <- resultados_MCO[[fuente]][["12"]]$residuos
-  plot(tiempos, apply(R, 2, var, na.rm = TRUE), type = "l", lwd = 2,
-       xlab = "Pentada", ylab = "Varianza residual", main = paste("Varianza residual -", fuente))
-  contour(tiempos, tiempos, cor(R, use = "pairwise.complete.obs"), nlevels = 10,
-          xlab = "Pentada s", ylab = "Pentada t", main = paste("Correlacion residual -", fuente))
-}
-par(mfrow = c(1, 1))
-
-# Prueba de independencia de los residuos de MCO
-autocorrelacion_residuos <- function(datos, Phi) {
-  completas <- datos[rowSums(is.na(datos)) == 0, ]
-  S <- Phi %*% solve(t(Phi) %*% Phi) %*% t(Phi)
-  r1 <- c()
-  for (i in 1:nrow(completas)) {
-    residuos <- completas[i, ] - S %*% completas[i, ]
-    r1[i] <- acf(residuos, lag.max = 1, plot = FALSE)$acf[2]
-  }
-  r1
-}
-
-r1_estaciones <- autocorrelacion_residuos(Y_train, eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 5)))
-r1_satelite <- autocorrelacion_residuos(X_train, eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 9)))
-
-# Porcentaje de curvas con autocorrelacion significativa (se espera 5 % si hay independencia)
-limite <- 1.96 / sqrt(72)
-mean(abs(r1_estaciones) > limite) * 100
-mean(abs(r1_satelite) > limite) * 100
-
-# Autocorrelacion de rezago 1 de todas las curvas
-par(mfrow = c(1, 2))
-hist(r1_estaciones, breaks = 30, main = "Estaciones", xlab = "Autocorrelacion de rezago 1")
-abline(v = c(-limite, limite), lty = 2, col = "red")
-hist(r1_satelite, breaks = 30, main = "Satelite", xlab = "Autocorrelacion de rezago 1")
-abline(v = c(-limite, limite), lty = 2, col = "red")
-par(mfrow = c(1, 1))
-
-
-# Heterocedasticidad de los residuos de MCO
-residuos_MCO <- function(datos, Phi) {
-  residuos <- matrix(NA, nrow(datos), 72)
-  for (i in 1:nrow(datos)) {
-    obs <- which(!is.na(datos[i, ]))
-    P <- Phi[obs, ]
-    residuos[i, obs] <- datos[i, obs] - P %*% solve(t(P) %*% P) %*% t(P) %*% datos[i, obs]
-  }
-  residuos
-}
-
-residuos_estaciones <- residuos_MCO(Y_train, eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 5)))
-residuos_satelite <- residuos_MCO(X_train, eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 9)))
-
-# Residuos de todas las curvas y su varianza en cada pentada
-par(mfrow = c(2, 2))
-matplot(tiempos, t(residuos_estaciones), type = "l", lty = 1, col = "grey", xlab = "Pentada", ylab = "Residuo",
-        main = "Residuos MCO - estaciones")
-matplot(tiempos, t(residuos_satelite), type = "l", lty = 1, col = "grey", xlab = "Pentada", ylab = "Residuo",
-        main = "Residuos MCO - satelite")
-plot(tiempos, apply(residuos_estaciones, 2, var, na.rm = TRUE), type = "b", pch = 19,
-     xlab = "Pentada", ylab = "Varianza residual", main = "Varianza por pentada - estaciones")
-plot(tiempos, apply(residuos_satelite, 2, var, na.rm = TRUE), type = "b", pch = 19,
-     xlab = "Pentada", ylab = "Varianza residual", main = "Varianza por pentada - satelite")
-par(mfrow = c(1, 1))
-
-# Cuantas veces es mayor la varianza en la pentada mas variable que en la menos variable
-varianza_estaciones <- apply(residuos_estaciones, 2, var, na.rm = TRUE)
-varianza_satelite <- apply(residuos_satelite, 2, var, na.rm = TRUE)
-max(varianza_estaciones) / min(varianza_estaciones)
-max(varianza_satelite) / min(varianza_satelite)
-
-
-# Precipitaciones negativas en los ajustes MCO
-for (fuente in names(fuentes)) {
-  for (K in K_evaluar) {
-    P <- resultados_MCO[[fuente]][[as.character(K)]]$predicciones
-    cat(fuente, "- K =", K, "- valores negativos:", sum(P < -1e-8, na.rm = TRUE),
-        "- curvas afectadas:", sum(rowSums(P < -1e-8, na.rm = TRUE) > 0),
-        "- minimo:", round(min(P, na.rm = TRUE), 2), "\n")
-  }
-}
-
-
-##### Comparacion MCO, MCP y MCG #####
-# MCP: W diagonal (varianzas distintas). MCG: W incluye covarianzas.
-# Sigma se estima con los residuos de MCO del 70 % de las estaciones
-# y se evalua en el 30 % restante, reservando una de cada 5 pentadas.
-# La muestra usa la semilla fijada al inicio (set.seed(2026)).
-estaciones_train <- sub("_[0-9]{4}$", "", rownames(Y_train))
-est_ref <- sample(unique(estaciones_train), floor(0.7 * length(unique(estaciones_train))))
-idx_ref <- estaciones_train %in% est_ref
-pentadas_prueba <- seq(5, 72, by = 5)
-
-# Minimos cuadrados con matriz Sigma (Sigma = NULL es MCO)
-ajustar_metodo <- function(y, Phi, obs, Sigma = NULL) {
-  P <- Phi[obs, ]
-  z <- y[obs]
-  if (!is.null(Sigma)) {
-    L <- t(chol(Sigma[obs, obs]))
-    z <- forwardsolve(L, z)
-    P <- forwardsolve(L, P)
-  }
-  if (nrow(P) <= ncol(P) || kappa(P, exact = TRUE) > 1e4) return(NULL)
-  coef <- solve(t(P) %*% P, t(P) %*% z)
-  list(coef = as.vector(coef), pred = as.vector(Phi %*% coef))
-}
-
-# MCG con coeficientes c >= 0: como las B-splines son no negativas, la curva no es negativa
-ajustar_MCG_positivo <- function(y, Phi, obs, Sigma) {
-  K <- ncol(Phi)
-  if (length(obs) <= K) return(list(estado = "observaciones_insuficientes"))
-  L <- t(chol(Sigma[obs, obs]))
-  Pw <- forwardsolve(L, Phi[obs, ])
-  zw <- forwardsolve(L, y[obs])
-  if (kappa(Pw, exact = TRUE) > 1e4) return(list(estado = "mal_condicionada"))
-  
-  escala <- max(1, sum(zw^2))
-  objetivo <- function(c) sum((zw - Pw %*% c)^2) / escala
-  gradiente <- function(c) as.vector(2 * t(Pw) %*% (Pw %*% c - zw) / escala)
-  inicio <- pmax(0, as.vector(qr.solve(Pw, zw)))
-  
-  ajuste <- optim(inicio, objetivo, gradiente, method = "L-BFGS-B",
-                  lower = rep(0, K), control = list(maxit = 3000))
-  if (ajuste$convergence != 0) {
-    ajuste <- nlminb(inicio, objetivo, gradiente, lower = rep(0, K),
-                     control = list(iter.max = 3000, eval.max = 5000))
-  }
-  if (ajuste$convergence != 0) return(list(estado = "sin_convergencia"))
-  
-  coef <- pmax(0, ajuste$par)
-  g <- gradiente(coef)
-  g[coef <= 1e-8 & g > 0] <- 0
-  if (max(abs(g)) > 1e-4) return(list(estado = "optimalidad_no_verificada"))
-  list(estado = "ok", coef = coef, pred = as.vector(Phi %*% coef))
-}
-
-# ECM en las pentadas reservadas de las estaciones de evaluacion
-comparacion_metodos <- data.frame()
-sigmas <- list()
-for (fuente in names(fuentes)) {
-  M <- fuentes[[fuente]]
-  sigmas[[fuente]] <- list()
-  for (K in K_evaluar) {
-    a <- resultados_MCO[[fuente]][[as.character(K)]]
-    
-    # Covarianza de los residuos MCO de las curvas completas de referencia
-    R_ref <- a$residuos[idx_ref & rowSums(is.na(a$residuos)) == 0, ]
-    Sigma <- cov(R_ref)
-    eps <- 0.01 * median(diag(Sigma))
-    Sigma_MCP <- diag(diag(Sigma)) + eps * diag(72)
-    Sigma_MCG <- 0.5 * Sigma + 0.5 * diag(diag(Sigma)) + eps * diag(72)
-    sigmas[[fuente]][[as.character(K)]] <- Sigma_MCG
-    
-    ecm <- c()
-    negativos <- c(MCO = 0, MCP = 0, MCG = 0)
-    for (i in which(!idx_ref)) {
-      y <- M[i, ]
-      prueba <- intersect(which(!is.na(y)), pentadas_prueba)
-      obs <- setdiff(which(!is.na(y)), prueba)
-      mco <- ajustar_metodo(y, a$Phi, obs)
-      mcp <- ajustar_metodo(y, a$Phi, obs, Sigma_MCP)
-      mcg <- ajustar_metodo(y, a$Phi, obs, Sigma_MCG)
-      if (length(prueba) == 0 || is.null(mco) || is.null(mcp) || is.null(mcg)) next
-      ecm <- rbind(ecm, c(MCO = mean((y[prueba] - mco$pred[prueba])^2),
-                          MCP = mean((y[prueba] - mcp$pred[prueba])^2),
-                          MCG = mean((y[prueba] - mcg$pred[prueba])^2)))
-      negativos <- negativos + c(sum(mco$pred < -1e-8), sum(mcp$pred < -1e-8), sum(mcg$pred < -1e-8))
-    }
-    comparacion_metodos <- rbind(comparacion_metodos,
-                                 data.frame(fuente = fuente, K = K, curvas = nrow(ecm),
-                                            ECM_MCO = mean(ecm[, "MCO"]), ECM_MCP = mean(ecm[, "MCP"]),
-                                            ECM_MCG = mean(ecm[, "MCG"]),
-                                            neg_MCO = negativos[1], neg_MCP = negativos[2], neg_MCG = negativos[3]))
-  }
-}
-comparacion_metodos$mejora_MCP <- 100 * (comparacion_metodos$ECM_MCO - comparacion_metodos$ECM_MCP) / comparacion_metodos$ECM_MCO
-comparacion_metodos$mejora_MCG <- 100 * (comparacion_metodos$ECM_MCO - comparacion_metodos$ECM_MCG) / comparacion_metodos$ECM_MCO
-rownames(comparacion_metodos) <- NULL
-comparacion_metodos
-
-# Propiedades de la matriz suavizadora de MCG (terrestre, K = 12)
-Phi <- construir_bspline(tiempos, 12)
-W <- solve(sigmas$terrestre[["12"]])
-S_MCG <- Phi %*% solve(t(Phi) %*% W %*% Phi) %*% t(Phi) %*% W
-max(abs(S_MCG %*% S_MCG - S_MCG))   # idempotente
-sum(diag(S_MCG))                    # traza = K
-max(abs(S_MCG - t(S_MCG)))          # no es simetrica
-
-
-##### Construccion con MCG restringido (curvas no negativas) #####
-verificacion_final <- data.frame()
-comparacion_validacion <- data.frame()
-for (fuente in names(fuentes)) {
-  M <- fuentes[[fuente]]
-  for (K in K_evaluar) {
-    Phi <- construir_bspline(tiempos, K)
-    Sigma <- sigmas[[fuente]][[as.character(K)]]
-    
-    # Todas las curvas
-    coeficientes <- matrix(NA, nrow(M), K)
-    predicciones <- matrix(NA, nrow(M), 72)
-    for (i in 1:nrow(M)) {
-      positivo <- ajustar_MCG_positivo(M[i, ], Phi, which(!is.na(M[i, ])), Sigma)
-      if (positivo$estado == "ok") {
-        coeficientes[i, ] <- positivo$coef
-        predicciones[i, ] <- positivo$pred
-      }
-    }
-    verificacion_final <- rbind(verificacion_final,
-                                data.frame(fuente = fuente, K = K,
-                                           ajustadas = sum(!is.na(coeficientes[, 1])),
-                                           pendientes = sum(is.na(coeficientes[, 1])),
-                                           coef_negativos = sum(coeficientes < -1e-8, na.rm = TRUE),
-                                           pred_negativas = sum(predicciones < -1e-8, na.rm = TRUE),
-                                           minimo = min(predicciones, na.rm = TRUE)))
-    
-    # Validacion en las pentadas reservadas: MCG frente a MCG restringido
-    ecm <- c()
-    for (i in which(!idx_ref)) {
-      y <- M[i, ]
-      prueba <- intersect(which(!is.na(y)), pentadas_prueba)
-      obs <- setdiff(which(!is.na(y)), prueba)
-      if (length(prueba) == 0) next
-      mcg <- ajustar_metodo(y, Phi, obs, Sigma)
-      positivo <- ajustar_MCG_positivo(y, Phi, obs, Sigma)
-      if (is.null(mcg) || positivo$estado != "ok") next
-      ecm <- rbind(ecm, c(mean((y[prueba] - mcg$pred[prueba])^2),
-                          mean((y[prueba] - positivo$pred[prueba])^2)))
-    }
-    comparacion_validacion <- rbind(comparacion_validacion,
-                                    data.frame(fuente = fuente, K = K, curvas = nrow(ecm),
-                                               ECM_MCG = mean(ecm[, 1]), ECM_restringido = mean(ecm[, 2])))
-  }
-}
-verificacion_final
-comparacion_validacion$mejora_pct <- 100 * (comparacion_validacion$ECM_MCG - comparacion_validacion$ECM_restringido) /
-  comparacion_validacion$ECM_MCG
-comparacion_validacion
-
-# Grafica: MCG frente a MCG restringido en una curva (K = 12)
-Phi <- construir_bspline(tiempos, 12)
-par(mfrow = c(1, 2))
-for (fuente in names(fuentes)) {
-  y <- fuentes[[fuente]][1, ]
-  obs <- which(!is.na(y))
-  mcg <- ajustar_metodo(y, Phi, obs, sigmas[[fuente]][["12"]])
-  positivo <- ajustar_MCG_positivo(y, Phi, obs, sigmas[[fuente]][["12"]])
-  plot(tiempos, y, pch = 16, cex = 0.5, xlab = "Pentada", ylab = "Precipitacion (mm)",
-       main = paste("MCG vs MCG restringido -", fuente))
-  lines(tiempos, mcg$pred, col = "blue", lwd = 2)
-  lines(tiempos, positivo$pred, col = "red", lwd = 2)
-  abline(h = 0, lty = 2)
-  legend("topright", c("MCG", "MCG restringido"), col = c("blue", "red"), lty = 1, bty = "n")
-}
-par(mfrow = c(1, 1))
-
 ##### Seleccion de la base, el numero de bases y el metodo #####
 criterios <- function(datos, Phi, pesos = rep(1, 72), R = 0, lambda = 0) {
   ECM <- c()
@@ -935,15 +661,20 @@ criterios <- function(datos, Phi, pesos = rep(1, 72), R = 0, lambda = 0) {
   c(ECM = mean(ECM), VC = mean(VC), VCG = sum(VCG))
 }
 
-# Pesos de MCP
-pesos_MCP <- function(datos, Phi) {
+# Residuos de MCO de cada curva
+residuos_MCO <- function(datos, Phi) {
   residuos <- matrix(NA, nrow(datos), 72)
   for (i in 1:nrow(datos)) {
     obs <- which(!is.na(datos[i, ]))
     P <- Phi[obs, ]
     residuos[i, obs] <- datos[i, obs] - P %*% solve(t(P) %*% P) %*% t(P) %*% datos[i, obs]
   }
-  1 / colMeans(residuos^2, na.rm = TRUE)
+  residuos
+}
+
+# Pesos de MCP
+pesos_MCP <- function(datos, Phi) {
+  1 / colMeans(residuos_MCO(datos, Phi)^2, na.rm = TRUE)
 }
 
 crear_base <- function(nombre, K) {
@@ -952,7 +683,8 @@ crear_base <- function(nombre, K) {
   create.monomial.basis(c(0, 72), nbasis = K)
 }
 
-# B-spline cubica
+# B-spline cubica: K de 4 a 15 (con K mayor algunas curvas con NA interpolan, s_ii = 1)
+# Fourier: K impar (K = 2M + 1).  Monomial: K de 1 a 4 (con mas, Phi'Phi no se puede invertir)
 valores_K <- list("B-spline" = 4:15, "Fourier" = seq(3, 15, 2), "Monomial" = 1:4)
 
 # MCO y MCP para cada base y K
@@ -972,9 +704,7 @@ for (nombre in names(valores_K)) {
   }
 }
 
-# Penalizacion por rugosidad con una base amplia; lambda se elige con la VC (parametro = log10(lambda))
-# B-spline: K = 72 y penalizacion de la segunda derivada
-# Fourier: K = 71 y aceleracion armonica (no penaliza el ciclo anual)
+# Penalizacion por rugosidad con una base amplia
 base_bspline <- create.bspline.basis(c(0, 72), nbasis = 72, norder = 4)
 base_fourier <- create.fourier.basis(c(0, 72), nbasis = 71)
 penalizadas <- list("B-spline" = list(Phi = eval.basis(tiempos, base_bspline),
@@ -995,12 +725,12 @@ for (nombre in names(penalizadas)) {
 }
 tabla
 
-# Tabla de ablacion: la mejor configuracion (menor VC) de cada fuente, base y metodo
+# Tabla de ablacion
 ablacion <- tabla[order(tabla$fuente, tabla$VC), ]
 ablacion <- ablacion[!duplicated(ablacion[, c("fuente", "base", "metodo")]), ]
 ablacion
 
-# Graficas de VC: MCO y MCP para cada base (estaciones arriba, satelite abajo)
+# Graficas de VC
 par(mfrow = c(2, 3))
 for (f in c("estaciones", "satelite")) {
   for (nombre in names(valores_K)) {
@@ -1026,25 +756,107 @@ for (f in c("estaciones", "satelite")) {
 }
 par(mfrow = c(1, 1))
 
+# Base elegida
+# ECM, VC y VCG frente a K
+estaciones_MCP <- tabla[tabla$fuente == "estaciones" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
+satelite_MCP <- tabla[tabla$fuente == "satelite" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
+K_estaciones <- estaciones_MCP$parametro[which.min(estaciones_MCP$VC)]
+K_satelite <- satelite_MCP$parametro[which.min(satelite_MCP$VC)]
+K_estaciones
+K_satelite
 
-# Validacion cruzada: el atajo con la diagonal de S da lo mismo que dejar uno por fuera
-Phi <- eval.basis(tiempos, crear_base("B-spline", 6))
+par(mfrow = c(2, 3))
+for (criterio in c("ECM", "VC", "VCG")) {
+  plot(estaciones_MCP$parametro, estaciones_MCP[[criterio]], type = "b", pch = 19, xlab = "K", ylab = criterio,
+       main = paste(criterio, "- estaciones"))
+  abline(v = K_estaciones, lty = 3, col = "red")
+}
+for (criterio in c("ECM", "VC", "VCG")) {
+  plot(satelite_MCP$parametro, satelite_MCP[[criterio]], type = "b", pch = 19, xlab = "K", ylab = criterio,
+       main = paste(criterio, "- satelite"))
+  abline(v = K_satelite, lty = 3, col = "red")
+}
+par(mfrow = c(1, 1))
+
+Phi_estaciones <- eval.basis(tiempos, crear_base("B-spline", K_estaciones))
+Phi_satelite <- eval.basis(tiempos, crear_base("B-spline", K_satelite))
+
+# Validacion cruzada
 y <- Y_train[which(rowSums(is.na(Y_train)) == 0)[1], ]
-
-S <- Phi %*% solve(t(Phi) %*% Phi) %*% t(Phi)
+S <- Phi_estaciones %*% solve(t(Phi_estaciones) %*% Phi_estaciones) %*% t(Phi_estaciones)
 VC_atajo <- mean(((y - S %*% y) / (1 - diag(S)))^2)
 
 prediccion <- c()
 for (j in 1:72) {
-  coeficientes <- solve(t(Phi[-j, ]) %*% Phi[-j, ]) %*% t(Phi[-j, ]) %*% y[-j]
-  prediccion[j] <- Phi[j, ] %*% coeficientes
+  coeficientes <- solve(t(Phi_estaciones[-j, ]) %*% Phi_estaciones[-j, ]) %*% t(Phi_estaciones[-j, ]) %*% y[-j]
+  prediccion[j] <- Phi_estaciones[j, ] %*% coeficientes
 }
 VC_dejar_uno <- mean((y - prediccion)^2)
 
 VC_atajo
 VC_dejar_uno
 
-# Valores negativos en las curvas ajustadas 
+# Matriz suavizadora de MCP
+pesos_estaciones <- pesos_MCP(Y_train, Phi_estaciones)
+pesos_satelite <- pesos_MCP(X_train, Phi_satelite)
+
+S_estaciones <- Phi_estaciones %*% solve(t(Phi_estaciones * pesos_estaciones) %*% Phi_estaciones) %*% t(Phi_estaciones * pesos_estaciones)
+max(abs(S_estaciones %*% S_estaciones - S_estaciones))
+sum(diag(S_estaciones))
+
+S_satelite <- Phi_satelite %*% solve(t(Phi_satelite * pesos_satelite) %*% Phi_satelite) %*% t(Phi_satelite * pesos_satelite)
+max(abs(S_satelite %*% S_satelite - S_satelite))
+sum(diag(S_satelite))
+
+
+##### Residuos de MCO #####
+# MCO supone residuos independientes y con varianza constante 
+autocorrelacion_residuos <- function(datos, Phi) {
+  completas <- datos[rowSums(is.na(datos)) == 0, ]
+  S <- Phi %*% solve(t(Phi) %*% Phi) %*% t(Phi)
+  r1 <- c()
+  for (i in 1:nrow(completas)) {
+    residuos <- completas[i, ] - S %*% completas[i, ]
+    r1[i] <- acf(residuos, lag.max = 1, plot = FALSE)$acf[2]
+  }
+  r1
+}
+
+r1_estaciones <- autocorrelacion_residuos(Y_train, Phi_estaciones)
+r1_satelite <- autocorrelacion_residuos(X_train, Phi_satelite)
+
+limite <- 1.96 / sqrt(72)
+mean(abs(r1_estaciones) > limite) * 100
+mean(abs(r1_satelite) > limite) * 100
+
+par(mfrow = c(1, 2))
+hist(r1_estaciones, breaks = 30, main = "Estaciones", xlab = "Autocorrelacion de rezago 1")
+abline(v = c(-limite, limite), lty = 2, col = "red")
+hist(r1_satelite, breaks = 30, main = "Satelite", xlab = "Autocorrelacion de rezago 1")
+abline(v = c(-limite, limite), lty = 2, col = "red")
+par(mfrow = c(1, 1))
+
+# Heterocedasticidad: varianza de los residuos en cada pentada
+residuos_estaciones <- residuos_MCO(Y_train, Phi_estaciones)
+residuos_satelite <- residuos_MCO(X_train, Phi_satelite)
+varianza_estaciones <- apply(residuos_estaciones, 2, var, na.rm = TRUE)
+varianza_satelite <- apply(residuos_satelite, 2, var, na.rm = TRUE)
+
+par(mfrow = c(2, 2))
+matplot(tiempos, t(residuos_estaciones), type = "l", lty = 1, col = "grey", xlab = "Pentada", ylab = "Residuo",
+        main = "Residuos MCO - estaciones")
+matplot(tiempos, t(residuos_satelite), type = "l", lty = 1, col = "grey", xlab = "Pentada", ylab = "Residuo",
+        main = "Residuos MCO - satelite")
+plot(tiempos, varianza_estaciones, type = "b", pch = 19, xlab = "Pentada", ylab = "Varianza residual",
+     main = "Varianza por pentada - estaciones")
+plot(tiempos, varianza_satelite, type = "b", pch = 19, xlab = "Pentada", ylab = "Varianza residual",
+     main = "Varianza por pentada - satelite")
+par(mfrow = c(1, 1))
+
+max(varianza_estaciones) / min(varianza_estaciones)
+max(varianza_satelite) / min(varianza_satelite)
+
+##### Valores negativos en las curvas ajustadas con MCP #####
 ajuste_MCP <- function(datos, Phi, pesos) {
   ajustes <- matrix(NA, nrow(datos), 72)
   for (i in 1:nrow(datos)) {
@@ -1055,10 +867,8 @@ ajuste_MCP <- function(datos, Phi, pesos) {
   ajustes
 }
 
-Phi_estaciones <- eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 5))
-Phi_satelite <- eval.basis(tiempos, create.fourier.basis(c(0, 72), nbasis = 9))
-ajustes_estaciones <- ajuste_MCP(Y_train, Phi_estaciones, 1 / apply(residuos_estaciones^2, 2, mean, na.rm = TRUE))
-ajustes_satelite <- ajuste_MCP(X_train, Phi_satelite, 1 / apply(residuos_satelite^2, 2, mean, na.rm = TRUE))
+ajustes_estaciones <- ajuste_MCP(Y_train, Phi_estaciones, pesos_estaciones)
+ajustes_satelite <- ajuste_MCP(X_train, Phi_satelite, pesos_satelite)
 
 # Porcentaje de valores negativos, curvas afectadas y valor minimo
 mean(ajustes_estaciones < 0) * 100
@@ -1068,17 +878,12 @@ mean(ajustes_satelite < 0) * 100
 sum(rowSums(ajustes_satelite < 0) > 0)
 min(ajustes_satelite)
 
+# Fourier tiene una VC un poco menor, pero se usa B-spline porque el codificador de la red
+# exige curvas y pesos en B-splines (z = A W c).
 # La diferencia entre penalizar y no penalizar es minima (menos del 1 % en la VC).
-# Fourier es la base con mejor rendimiento en todas las comparaciones.
-# MCO se rechaza: la varianza de los residuos cambia a lo largo del año
-# (mayor en las temporadas lluviosas). La autocorrelacion de los residuos es debil.
-# Se escoge MCP, que corrige la heterocedasticidad. MCG no se usa porque la Sigma
-# estimada con los residuos no es invertible.
-# Se escoge K = 5 para estaciones y K = 9 para satelite (menor VC con Fourier y MCP).
-
-# El 0.95% de los datos de estacion tiene valores menores a cero.
-
-
+# MCO se rechaza: la varianza de los residuos cambia a lo largo del año (mayor en las
+# temporadas lluviosas). La autocorrelacion de los residuos es debil.
+# Se escoge MCP
 
 
 ##### Varianza y bandas #####
@@ -1101,12 +906,12 @@ for (fuente in names(fuentes)) {
     obs <- !is.na(datos[i, ])
     aptas[i] <- qr(Phi_ref[obs, , drop = FALSE], tol = 1e-9)$rank == K_ref
   }
-
+  
   gl_residual[!aptas] <- NA_integer_
   SSE[!aptas] <- NA_real_
   sigma2 <- SSE / gl_residual
   varianza_residual_MCO[[fuente]] <- data.frame(curva = rownames(datos), n_obs, K = K_ref,
-                                              gl_residual, SSE, sigma2)
+                                                gl_residual, SSE, sigma2)
   cat(fuente, "- estimaciones de sigma^2:", sum(aptas), "de", length(aptas), "curvas\n")
   print(summary(sigma2))
 }
@@ -1118,7 +923,7 @@ for (fuente in names(fuentes)) {
   datos_mcp <- fuentes[[fuente]]
   Phi_mcp <- bases_referencia[[fuente]]
   R_mcp <- residuos_referencia[[fuente]]
-
+  
   # Diagonal de Sigma estimada con el segundo momento residual por pentada
   varianzas_mcp <- apply(R_mcp^2, 2, mean, na.rm = TRUE)
   n_residuos_mcp <- colSums(is.finite(R_mcp))
@@ -1127,7 +932,7 @@ for (fuente in names(fuentes)) {
   varianzas_mcp[!pesos_validos] <- NA_real_
   pesos_mcp[!pesos_validos] <- NA_real_
   Sigma_mcp <- diag(varianzas_mcp)
-
+  
   curvas_mcp <- vector("list", nrow(datos_mcp))
   names(curvas_mcp) <- rownames(datos_mcp)
   for (i in seq_len(nrow(datos_mcp))) {
@@ -1135,15 +940,15 @@ for (fuente in names(fuentes)) {
     if (length(obs) < ncol(Phi_mcp) || any(!pesos_validos[obs])) next
     P <- Phi_mcp[obs, , drop = FALSE]
     if (qr(P, tol = 1e-9)$rank < ncol(Phi_mcp)) next
-
+    
     # C = (P' W P)^-1 P' W sobre las pentadas observadas
     PW <- t(P * pesos_mcp[obs])
     C_mcp <- solve(PW %*% P, PW)
     curvas_mcp[[i]] <- list(obs = obs, C = C_mcp, varianzas_obs = varianzas_mcp[obs])
   }
-
+  
   mapas_MCP[[fuente]] <- list(Phi = Phi_mcp, pesos = pesos_mcp, Sigma = Sigma_mcp,
-                             n_residuos = n_residuos_mcp, curvas = curvas_mcp)
+                              n_residuos = n_residuos_mcp, curvas = curvas_mcp)
   cat(fuente, "- mapas C:", sum(lengths(curvas_mcp) > 0), "de", length(curvas_mcp),
       "curvas | pentadas sin peso:", sum(!pesos_validos), "\n")
 }
@@ -1185,14 +990,14 @@ for (fuente in names(mapas_MCP)) {
   datos_mcp <- fuentes[[fuente]]
   varianzas_curvas <- matrix(NA_real_, nrow(datos_mcp), ncol(datos_mcp),
                              dimnames = dimnames(datos_mcp))
-
+  
   for (i in which(lengths(mapa$curvas) > 0)) {
     curva <- mapa$curvas[[i]]
     Phi_C <- mapa$Phi %*% curva$C
     # Diagonal de Phi C Sigma C' Phi' cuando Sigma es diagonal
     varianzas_curvas[i, ] <- Phi_C^2 %*% curva$varianzas_obs
   }
-
+  
   varianza_curvas_MCP[[fuente]] <- varianzas_curvas
 }
 
