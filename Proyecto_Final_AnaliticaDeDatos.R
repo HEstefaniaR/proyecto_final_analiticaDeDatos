@@ -15,9 +15,9 @@ library(geodata)
 library(tidyverse)
 
 set.seed(2026)
-
 ##### Directorio de trabajo #####
 rm(list = ls())
+setwd("C:/Users/yenpa/Desktop/analitica 3/proyecto_final_analiticaDeDatos")
 dir.create("Resultados", showWarnings = FALSE)
 
 ##### Carga de datos #####
@@ -842,16 +842,20 @@ residuos_satelite <- residuos_MCO(X_train, Phi_satelite)
 varianza_estaciones <- apply(residuos_estaciones, 2, var, na.rm = TRUE)
 varianza_satelite <- apply(residuos_satelite, 2, var, na.rm = TRUE)
 
-par(mfrow = c(2, 2))
-matplot(tiempos, t(residuos_estaciones), type = "l", lty = 1, col = "grey", xlab = "Pentada", ylab = "Residuo",
-        main = "Residuos MCO - estaciones")
-matplot(tiempos, t(residuos_satelite), type = "l", lty = 1, col = "grey", xlab = "Pentada", ylab = "Residuo",
-        main = "Residuos MCO - satelite")
-plot(tiempos, varianza_estaciones, type = "b", pch = 19, xlab = "Pentada", ylab = "Varianza residual",
-     main = "Varianza por pentada - estaciones")
-plot(tiempos, varianza_satelite, type = "b", pch = 19, xlab = "Pentada", ylab = "Varianza residual",
-     main = "Varianza por pentada - satelite")
-par(mfrow = c(1, 1))
+graphics.off()
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+
+matplot(tiempos, t(residuos_estaciones), type = "l", lty = 1, col = "grey",
+        xlab = "Pentada", ylab = "Residuo", main = "Residuos MCO - estaciones")
+
+matplot(tiempos, t(residuos_satelite), type = "l", lty = 1, col = "grey",
+        xlab = "Pentada", ylab = "Residuo", main = "Residuos MCO - satélite")
+
+plot(tiempos, varianza_estaciones, type = "l",
+     xlab = "Pentada", ylab = "Varianza", main = "Varianza residual - estaciones")
+
+plot(tiempos, varianza_satelite, type = "l",
+     xlab = "Pentada", ylab = "Varianza", main = "Varianza residual - satélite")
 
 max(varianza_estaciones) / min(varianza_estaciones)
 max(varianza_satelite) / min(varianza_satelite)
@@ -1086,4 +1090,298 @@ for (curva_bandas in curvas_bandas) {
   }
   par(par_bandas_anterior)
 }
+
+
+##### Verificación del emparejamiento estación-píxel #####
+par(mfrow = c(1, 1), mar = c(4, 4, 2, 1))
+
+## 1. Sistema de referencia y cobertura
+crs(p_sat, describe = TRUE)[, c("name", "code")]
+same.crs(puntos, p_sat)                          # TRUE = mismo CRS
+ext(p_sat); res(p_sat); nlyr(p_sat)              # nlyr debe ser 1440 (20 años x 72)
+puntos_r <- project(puntos, crs(p_sat))          # reproyecta solo si hace falta
+sum(cellFromXY(p_sat, crds(puntos_r)) != estaciones$pixel, na.rm = TRUE)   # 0 = no cambia nada
+range(estaciones$longitud); range(estaciones$latitud)   # Valle: lon ~ -77.6 a -75.7, lat ~ 3.0 a 5.1
+
+## 2. Estaciones "Fuera del raster" (381 pares)
+fuera <- unique(curvas[curvas$estado == "Fuera del raster", c("STATION_ID", "longitud", "latitud")])
+nrow(fuera); head(fuera)
+plot(p_sat[[1]], main = "Estaciones sobre el raster")
+points(puntos_r, pch = 16, cex = 0.6)
+points(vect(fuera, geom = c("longitud", "latitud"), crs = "EPSG:4326"), col = "red", pch = 17)
+
+## 3. Estaciones "Sin coordenadas" (1.305 pares)
+sin <- unique(curvas$STATION_ID[curvas$estado == "Sin coordenadas"])
+length(sin)
+head(sin); head(coord$STATION_ID); head(alt$STATION_ID)
+table(nchar(sin)); table(nchar(coord$STATION_ID))      # longitudes de código distintas = problema de formato
+c(en_coord = sum(sin %in% coord$STATION_ID), en_alt = sum(sin %in% alt$STATION_ID))
+sum(is.na(coord$Lon) | is.na(coord$lat))
+
+##### 4. Verificación del orden cronológico #####
+
+nm <- basename(archivos)
+
+# Ejemplo: ppt198101.tif
+#          ppt | 1981 | 01
+anio <- as.integer(substr(nm, 4, 7))
+pent <- as.integer(substr(nm, 8, 9))
+
+# Verificar 72 péntadas por año y su orden
+verificacion <- tapply(
+  pent, anio,
+  function(p) identical(as.integer(p), 1:72)
+)
+
+print(verificacion)
+all(verificacion)
+
+# Comprobar años incluidos
+table(anio)        # TRUE = orden 1..72 en cada año
+
+## 5. Prueba empírica: si todo está alineado, la correlación máxima debe estar en rezago 0
+lags <- -3:3
+cor_lag <- sapply(lags, function(l) {
+  a <- if (l >= 0) 1:(72 - l) else (1 - l):72
+  median(suppressWarnings(sapply(1:nrow(Y_matriz), function(i)
+    cor(Y_matriz[i, a], X_matriz[i, a + l], use = "complete.obs"))), na.rm = TRUE)
+})
+setNames(round(cor_lag, 3), lags)
+
+## 6. Escala y píxeles compartidos
+c(mean_tierra = mean(Y_matriz, na.rm = TRUE), mean_sat = mean(X_matriz, na.rm = TRUE))
+c(min_sat = min(X_matriz, na.rm = TRUE), max_sat = max(X_matriz, na.rm = TRUE))   # -9999 = bandera sin limpiar
+table(table(estaciones$pixel))                                                    # cuántos píxeles tienen 1, 2, 3... estaciones
+
+
+
+
+
+
+############################################################
+# Proyecto 3 - Prueba de sensibilidad de B-splines terrestres
+# Comparacion de K para MCP - estilo de los scripts de clase
+# Ejecutar DESPUES del script principal. No modifica Y ni Y_ajuste.
+############################################################
+
+library(fda)
+set.seed(2026)
+
+##### 1. Datos y parametros #####
+stopifnot(exists("Y_train"), exists("Y_val"), exists("Y_matriz"),
+          ncol(Y_train) == 72, ncol(Y_val) == 72)
+
+tiempos_prueba <- 1:72
+K_prueba <- c(6, 8, 10, 12, 15)
+
+# Mismas bases B-spline cubicas [0,72] del script principal
+base_prueba <- function(K) {
+  b <- create.bspline.basis(c(0, 72), nbasis = K, norder = 4)
+  eval.basis(tiempos_prueba, b)
+}
+
+##### 2. Funciones auxiliares #####
+# Estima pesos MCP a partir de residuos MCO del entrenamiento,
+# siguiendo el procedimiento del grupo. No usa datos de validacion.
+pesos_prueba <- function(datos, Phi) {
+  residuos <- matrix(NA_real_, nrow(datos), 72)
+  K <- ncol(Phi)
+  for (i in seq_len(nrow(datos))) {
+    obs <- which(is.finite(datos[i, ]))
+    if (length(obs) <= K) next
+    P <- Phi[obs, , drop = FALSE]
+    if (qr(P, tol = 1e-9)$rank < K) next
+    coef <- tryCatch(qr.solve(P, datos[i, obs]), error = function(e) NULL)
+    if (is.null(coef)) next
+    residuos[i, obs] <- datos[i, obs] - as.vector(P %*% coef)
+  }
+  v <- colMeans(residuos^2, na.rm = TRUE)
+  if (any(!is.finite(v)) || any(v <= 0)) stop("Varianza residual no positiva o no finita.")
+  1 / v
+}
+
+# Ajuste MCP individual y validacion cruzada dejando una pentada fuera.
+# Para MCP, los leverage s_jj se calculan con los pesos W.
+# Los pesos se consideran fijos, calculados en entrenamiento.
+evaluar_curvas <- function(datos, Phi, pesos, conjunto, K) {
+  resumen <- matrix(NA_real_, nrow(datos), 8)
+  colnames(resumen) <- c("SSE", "nobs", "SCV", "ncv", "SCV_fin",
+                         "ncv_fin", "sesgo_P72", "error_P72")
+  media_ajustada <- rep(0, 72)
+  n_ajustadas <- 0L
+  n_fallidas <- 0L
+  for (i in seq_len(nrow(datos))) {
+    obs <- which(is.finite(datos[i, ]))
+    if (length(obs) <= K) { n_fallidas <- n_fallidas + 1L; next }
+    P <- Phi[obs, , drop = FALSE]
+    if (qr(P, tol = 1e-9)$rank < K) { n_fallidas <- n_fallidas + 1L; next }
+    w <- pesos[obs]
+    PW <- t(P * w)
+    A <- crossprod(P, P * w)
+    Ainv <- tryCatch(solve(A), error = function(e) NULL)
+    if (is.null(Ainv)) { n_fallidas <- n_fallidas + 1L; next }
+    coef <- Ainv %*% PW %*% datos[i, obs]
+    pred <- as.vector(Phi %*% coef)
+    resid <- datos[i, obs] - pred[obs]
+    # Diagonal de S = P (P'WP)^-1 P'W
+    h <- rowSums((P %*% Ainv) * P) * w
+    okcv <- is.finite(h) & h < 1 - 1e-7
+    ecv <- rep(NA_real_, length(obs))
+    ecv[okcv] <- resid[okcv] / (1 - h[okcv])
+    es_fin <- obs >= 67
+    resumen[i, ] <- c(sum(resid^2), length(obs),
+                      sum(ecv^2, na.rm = TRUE), sum(is.finite(ecv)),
+                      sum(ecv[es_fin]^2, na.rm = TRUE),
+                      sum(is.finite(ecv[es_fin])),
+                      if (72 %in% obs) pred[72] - datos[i, 72] else NA_real_,
+                      if (72 %in% obs) abs(pred[72] - datos[i, 72]) else NA_real_)
+    media_ajustada <- media_ajustada + pred
+    n_ajustadas <- n_ajustadas + 1L
+  }
+  # Se calculan errores ponderados por numero de observaciones, para comparar K.
+  res <- data.frame(conjunto = conjunto, K = K,
+                    n_curvas = n_ajustadas, n_fallidas = n_fallidas,
+                    RMSE_ajuste = sqrt(sum(resumen[, "SSE"], na.rm = TRUE) /
+                                         sum(resumen[, "nobs"], na.rm = TRUE)),
+                    RMSE_VC = sqrt(sum(resumen[, "SCV"], na.rm = TRUE) /
+                                     sum(resumen[, "ncv"], na.rm = TRUE)),
+                    RMSE_VC_final = sqrt(sum(resumen[, "SCV_fin"], na.rm = TRUE) /
+                                           sum(resumen[, "ncv_fin"], na.rm = TRUE)),
+                    sesgo_P72 = mean(resumen[, "sesgo_P72"], na.rm = TRUE),
+                    MAE_P72 = mean(resumen[, "error_P72"], na.rm = TRUE))
+  list(resumen = res, media = if (n_ajustadas) media_ajustada / n_ajustadas else rep(NA_real_,72))
+}
+
+##### 3. Comparacion de K en entrenamiento y validacion #####
+resultados <- list()
+medias_val <- matrix(NA_real_, 72, length(K_prueba),
+                     dimnames = list(NULL, paste0("K=", K_prueba)))
+
+for (j in seq_along(K_prueba)) {
+  K <- K_prueba[j]
+  Phi <- base_prueba(K)
+  pesos <- pesos_prueba(Y_train, Phi)
+  res_train <- evaluar_curvas(Y_train, Phi, pesos, "Entrenamiento 1981-1995", K)
+  res_val <- evaluar_curvas(Y_val, Phi, pesos, "Validacion 1996-2000", K)
+  resultados[[j]] <- rbind(res_train$resumen, res_val$resumen)
+  medias_val[, j] <- res_val$media
+  cat("K =", K, "| VC entrenamiento =", round(res_train$resumen$RMSE_VC, 3),
+      "| VC validacion =", round(res_val$resumen$RMSE_VC, 3),
+      "| VC final validacion =", round(res_val$resumen$RMSE_VC_final, 3), "\n")
+}
+
+tabla_sensibilidad <- do.call(rbind, resultados)
+print(tabla_sensibilidad, row.names = FALSE, digits = 4)
+
+##### 4. Graficos de sensibilidad #####
+train <- subset(tabla_sensibilidad, grepl("Entrenamiento", conjunto))
+val <- subset(tabla_sensibilidad, grepl("Validacion", conjunto))
+
+par(mfrow = c(1, 2), mar = c(4.3, 4.5, 3, 1))
+plot(train$K, train$RMSE_VC, type = "b", pch = 19, col = "black",
+     xlab = "Numero de bases K", ylab = "RMSE de VC (mm)",
+     ylim = range(train$RMSE_VC, val$RMSE_VC),
+     main = "VC global: estacion")
+lines(val$K, val$RMSE_VC, type = "b", pch = 17, col = "steelblue")
+abline(v = 6, lty = 3, col = "red")
+legend("topright", c("Entrenamiento", "Validacion", "K actual"),
+       col = c("black", "steelblue", "red"), lty = c(1, 1, 3),
+       pch = c(19, 17, NA), bty = "n")
+plot(val$K, val$RMSE_VC_final, type = "b", pch = 19,
+     col = "firebrick", xlab = "Numero de bases K",
+     ylab = "RMSE de VC (mm)", main = "VC final: pentadas 67-72")
+abline(v = 6, lty = 3)
+par(mfrow = c(1, 1))
+
+# Comparar los promedios finales usando solamente validacion
+prom_obs_val <- colMeans(Y_val, na.rm = TRUE)
+cols <- 58:72
+matplot(cols, medias_val[cols, , drop = FALSE], type = "l", lty = 1,
+        col = seq_along(K_prueba) + 1, lwd = 2, xlab = "Pentada", ylab = "Precipitacion (mm)",
+        main = "Sensibilidad del ajuste terrestre en diciembre")
+points(cols, prom_obs_val[cols], pch = 16)
+lines(cols, prom_obs_val[cols], lty = 2, lwd = 2)
+legend("topleft", c("Observado", colnames(medias_val)),
+       lty = c(2, rep(1, length(K_prueba))),
+       pch = c(16, rep(NA, length(K_prueba))),
+       col = c("black", seq_along(K_prueba) + 1), bty = "n", cex = .75)
+# Los colores coinciden con las curvas de los distintos K.
+
+##### 5. Comparar seleccion sin alterar el modelo final #####
+K_mejor_train <- train$K[which.min(train$RMSE_VC)]
+cat("\nK con menor VC en entrenamiento:", K_mejor_train, "\n")
+cat("K actual del proyecto:", ncol(Phi_estaciones), "\n")
+cat("Comparar errores y sesgo final antes de decidir cualquier cambio.\n")
+
+
+
+##### Prueba final de sensibilidad del suavizado #####
+
+# Diferencias originales y funcionales
+D_original <- Y_matriz[validas, ] - X_matriz[validas, ]
+D_funcional <- Y - X
+
+# Diferencia media por pentada
+Media_original <- colMeans(D_original, na.rm = TRUE)
+Media_funcional <- colMeans(D_funcional)
+
+# Comparacion grafica
+par(mfrow = c(1, 1), mar = c(4, 4, 3, 1))
+
+plot(1:72, Media_original, type = "l",
+     lwd = 2, col = "black",
+     ylim = range(Media_original, Media_funcional),
+     xlab = "Pentada",
+     ylab = "Estacion - satelite (mm)",
+     main = "Sensibilidad de la diferencia funcional")
+
+lines(1:72, Media_funcional,
+      col = "red", lwd = 2)
+
+abline(h = 0, lty = 3)
+
+legend("topright",
+       c("Datos originales", "B-spline MCP"),
+       col = c("black", "red"),
+       lwd = 2, bty = "n")
+
+# Diferencia introducida por el suavizado
+Cambio_suavizado <- Media_funcional - Media_original
+
+# Concordancia en el signo
+mismo_signo <- sign(Media_original) == sign(Media_funcional)
+
+# Resumen
+resumen_sensibilidad <- data.frame(
+  Periodo = c("Inicio (1-6)", "Interior (7-66)",
+              "Final (67-72)", "Anio completo"),
+  Diferencia_absoluta_media = c(
+    mean(abs(Cambio_suavizado[1:6])),
+    mean(abs(Cambio_suavizado[7:66])),
+    mean(abs(Cambio_suavizado[67:72])),
+    mean(abs(Cambio_suavizado))
+  ),
+  Concordancia_signo_pct = c(
+    mean(mismo_signo[1:6]) * 100,
+    mean(mismo_signo[7:66]) * 100,
+    mean(mismo_signo[67:72]) * 100,
+    mean(mismo_signo) * 100
+  )
+)
+
+print(resumen_sensibilidad)
+
+# Pentadas con mayores diferencias por suavizado
+tabla_cambios <- data.frame(
+  pentada = 1:72,
+  original = Media_original,
+  funcional = Media_funcional,
+  cambio = Cambio_suavizado,
+  mismo_signo = mismo_signo
+)
+
+print(head(
+  tabla_cambios[order(-abs(tabla_cambios$cambio)), ],
+  10
+))
 
