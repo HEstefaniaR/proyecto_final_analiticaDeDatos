@@ -1092,6 +1092,442 @@ for (curva_bandas in curvas_bandas) {
 }
 
 
+##### Análisis exploratorio funcional #####
+
+# Pares aptos de 2001 a 2003
+metadatos_eda_prueba <- cobertura_prueba[cobertura_prueba$apto, c("STATION_ID", "YEAR")]
+metadatos_eda_prueba <- merge(metadatos_eda_prueba, info_estaciones, by = "STATION_ID", all.x = TRUE)
+metadatos_eda_prueba$curva <- with(metadatos_eda_prueba, paste(STATION_ID, YEAR, sep = "_"))
+metadatos_eda_prueba <- metadatos_eda_prueba[order(metadatos_eda_prueba$curva), ]
+
+archivos_eda_prueba <- list.files("data/ImagenesSatelitePentadal",
+                                 pattern = "^ppt200[1-3][0-9]{2}\\.tif$", full.names = TRUE)
+sat_eda_prueba <- rast(archivos_eda_prueba)
+
+# Píxeles conocidos y asignación de estaciones nuevas en la misma cuadrícula
+columnas_estacion_eda <- c("STATION_ID", "longitud", "latitud")
+estaciones_eda_prueba <- unique(metadatos_eda_prueba[, columnas_estacion_eda])
+indice_estacion_eda <- match(estaciones_eda_prueba$STATION_ID, estaciones$STATION_ID)
+estaciones_eda_prueba$pixel <- estaciones$pixel[indice_estacion_eda]
+xy_eda_prueba <- estaciones_eda_prueba[, c("longitud", "latitud")]
+estaciones_nuevas_eda <- is.na(indice_estacion_eda) & complete.cases(xy_eda_prueba)
+if (any(estaciones_nuevas_eda)) {
+  estaciones_eda_prueba$pixel[estaciones_nuevas_eda] <-
+    cellFromXY(sat_eda_prueba, as.matrix(xy_eda_prueba[estaciones_nuevas_eda, ]))
+}
+metadatos_eda_prueba$pixel <- estaciones_eda_prueba$pixel[
+  match(metadatos_eda_prueba$STATION_ID, estaciones_eda_prueba$STATION_ID)
+]
+
+# Lluvia satelital de 2001 a 2003 por píxel y año
+pixeles_eda_prueba <- unique(na.omit(metadatos_eda_prueba$pixel))
+lluvia_sat_eda_prueba <- as.matrix(terra::extract(sat_eda_prueba, pixeles_eda_prueba))
+X_eda_prueba <- matrix(NA_real_, nrow(metadatos_eda_prueba), length(tiempos),
+                       dimnames = list(metadatos_eda_prueba$curva, colnames(X_matriz)))
+for (i in which(!is.na(metadatos_eda_prueba$pixel))) {
+  capas <- paste0("ppt", metadatos_eda_prueba$YEAR[i], sprintf("%02d", tiempos))
+  fila <- match(metadatos_eda_prueba$pixel[i], pixeles_eda_prueba)
+  X_eda_prueba[i, ] <- lluvia_sat_eda_prueba[fila, match(capas, colnames(lluvia_sat_eda_prueba))]
+}
+emparejados_eda_prueba <- complete.cases(X_eda_prueba)
+X_eda_prueba <- X_eda_prueba[emparejados_eda_prueba, , drop = FALSE]
+metadatos_eda_prueba <- metadatos_eda_prueba[emparejados_eda_prueba, ]
+metadatos_eda_prueba$estado <- "Emparejado"
+
+# Lluvia terrestre por péntada de los pares de 2001 a 2003
+datos_eda_prueba <- merge(calendario_prueba, metadatos_eda_prueba[, c("STATION_ID", "YEAR", "curva")],
+                          by = c("STATION_ID", "YEAR"))
+mes_eda_prueba <- as.integer(format(datos_eda_prueba$fecha, "%m"))
+dia_eda_prueba <- as.integer(format(datos_eda_prueba$fecha, "%d"))
+datos_eda_prueba$pentada <- (mes_eda_prueba - 1) * 6 + pmin(6, (dia_eda_prueba - 1) %/% 5 + 1)
+Y_eda_prueba <- with(datos_eda_prueba, t(tapply(VALUE, list(pentada, curva), sum)))
+Y_eda_prueba <- Y_eda_prueba[rownames(X_eda_prueba), , drop = FALSE]
+colnames(Y_eda_prueba) <- colnames(Y_matriz)
+
+# Matrices emparejadas de 1981 a 2003
+metadatos_eda <- rbind(metadatos, metadatos_eda_prueba[, names(metadatos)])
+fuentes_eda <- list(terrestre = rbind(Y_matriz, Y_eda_prueba),
+                   satelital = rbind(X_matriz, X_eda_prueba))
+
+
+# Coeficientes MCP con las bases y los pesos estimados en entrenamiento
+bases_eda <- list(terrestre = crear_base("B-spline", K_estaciones),
+                  satelital = crear_base("B-spline", K_satelite))
+coeficientes_eda <- list()
+for (fuente in names(fuentes_eda)) {
+  datos_eda <- fuentes_eda[[fuente]]
+  mapa <- mapas_MCP[[fuente]]
+  Phi_eda <- mapa$Phi
+  coefs <- matrix(NA_real_, ncol(Phi_eda), nrow(datos_eda), dimnames = list(NULL, rownames(datos_eda)))
+  curvas_train <- names(mapa$curvas)
+
+  # Coeficientes de entrenamiento a partir de los mapas C
+  for (curva in curvas_train[lengths(mapa$curvas) > 0]) {
+    mapa_curva <- mapa$curvas[[curva]]
+    coefs[, curva] <- mapa_curva$C %*% datos_eda[curva, mapa_curva$obs]
+  }
+
+  # Coeficientes de 1996 a 2003 con los pesos MCP de la fuente
+  for (curva in setdiff(rownames(datos_eda), curvas_train)) {
+    obs <- which(is.finite(datos_eda[curva, ]))
+    P <- Phi_eda[obs, , drop = FALSE]
+    pesos_obs <- mapa$pesos[obs]
+    if (length(obs) < ncol(P) || any(!is.finite(pesos_obs) | pesos_obs <= 0)) next
+    if (qr(P, tol = 1e-9)$rank < ncol(P)) next
+    PW <- t(P * pesos_obs)
+    coefs[, curva] <- solve(PW %*% P, PW) %*% datos_eda[curva, obs]
+  }
+  coeficientes_eda[[fuente]] <- coefs
+}
+
+# Cobertura anual de los pares con ajuste en ambas fuentes
+pares_eda <- colnames(coeficientes_eda$terrestre)[colSums(!is.finite(coeficientes_eda$terrestre)) == 0 &
+                                               colSums(!is.finite(coeficientes_eda$satelital)) == 0]
+metadatos_eda <- metadatos_eda[match(pares_eda, metadatos_eda$curva), ]
+cobertura_eda <- rbind(cobertura[, c("YEAR", "apto")], cobertura_prueba[, c("YEAR", "apto")]) %>%
+  group_by(YEAR) %>%
+  summarize(pares_aptos = sum(apto), .groups = "drop")
+cobertura_eda$pares_eda <- as.integer(table(factor(metadatos_eda$YEAR, levels = cobertura_eda$YEAR)))
+as.data.frame(cobertura_eda)
+
+# Pares estación-año, estaciones y píxeles incluidos en el EDA
+resumen_cobertura_eda <- data.frame(
+  pares_estacion_anio = nrow(metadatos_eda),
+  estaciones = n_distinct(metadatos_eda$STATION_ID),
+  pixeles = n_distinct(metadatos_eda$pixel)
+)
+resumen_cobertura_eda
+
+
+# Media funcional paso a paso y comprobación con mean.fd()
+media_eda <- data.frame(pentada = seq(min(tiempos), max(tiempos), by = 0.5))
+curvas_eda_fd <- list()
+coeficientes_medios_eda <- list()
+media_eda_fd <- list()
+error_media_eda <- numeric()
+for (fuente in names(fuentes_eda)) {
+  fuentes_eda[[fuente]] <- fuentes_eda[[fuente]][pares_eda, , drop = FALSE]
+  coefs <- coeficientes_eda[[fuente]][, pares_eda, drop = FALSE]
+  coeficientes_eda[[fuente]] <- coefs
+  base_eda <- bases_eda[[fuente]]
+
+  coeficientes_medios_eda[[fuente]] <- rowMeans(coefs)
+  Phi_media_eda <- eval.basis(media_eda$pentada, base_eda)
+  media_eda[[fuente]] <- as.vector(Phi_media_eda %*% coeficientes_medios_eda[[fuente]])
+
+  curvas_eda_fd[[fuente]] <- fd(coefs, base_eda, list("Péntada", pares_eda, "Precipitación (mm)"))
+  media_eda_fd[[fuente]] <- mean.fd(curvas_eda_fd[[fuente]])
+  media_libreria <- eval.fd(media_eda$pentada, media_eda_fd[[fuente]])
+  error_media_eda[fuente] <- max(abs(media_eda[[fuente]] - media_libreria))
+}
+# Diferencia absoluta máxima entre la media manual y mean.fd() (mm)
+error_media_eda
+
+# Media funcional de la precipitación por fuente
+plot(media_eda$pentada, media_eda$terrestre, type = "l", lwd = 2, col = "steelblue",
+     ylim = range(media_eda$terrestre, media_eda$satelital),
+     xlab = "Péntada", ylab = "Precipitación media (mm)", main = "Media funcional de la precipitación")
+lines(media_eda$pentada, media_eda$satelital, lwd = 2, lty = 2, col = "darkorange")
+legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange"),
+       lty = c(1, 2), lwd = 2, bty = "n")
+# Las dos fuentes muestran picos de lluvia en abril-mayo y en noviembre, con un valle en julio-agosto
+# El pico de noviembre es el más alto del año en ambas fuentes
+# Los dos máximos separados por un periodo menos lluvioso muestran un patrón bimodal en la media
+# La media resume los pares estación-año disponibles; las estaciones con más años aportan más curvas
+
+
+# Varianza y desviación estándar entre curvas estación-año
+valores_eda <- list()
+varianza_eda <- data.frame(pentada = media_eda$pentada)
+desviacion_eda <- data.frame(pentada = media_eda$pentada)
+error_varianza_eda <- numeric()
+error_desviacion_eda <- numeric()
+resumen_dispersion_eda <- data.frame()
+for (fuente in names(curvas_eda_fd)) {
+  valores_eda[[fuente]] <- eval.fd(media_eda$pentada, curvas_eda_fd[[fuente]])
+  n_curvas_eda <- ncol(valores_eda[[fuente]])
+  diferencias_eda <- valores_eda[[fuente]] - media_eda[[fuente]]
+  varianza_eda[[fuente]] <- apply(diferencias_eda^2, 1, sum) / (n_curvas_eda - 1)
+  desviacion_eda[[fuente]] <- sqrt(varianza_eda[[fuente]])
+
+  # Comprobación con la varianza y la desviación estándar de R en cada punto
+  varianza_R <- apply(valores_eda[[fuente]], 1, var)
+  desviacion_R <- apply(valores_eda[[fuente]], 1, sd)
+  error_varianza_eda[fuente] <- max(abs(varianza_eda[[fuente]] - varianza_R))
+  error_desviacion_eda[fuente] <- max(abs(desviacion_eda[[fuente]] - desviacion_R))
+
+  minimo <- which.min(desviacion_eda[[fuente]])
+  maximo <- which.max(desviacion_eda[[fuente]])
+  resumen_dispersion_eda <- rbind(resumen_dispersion_eda,
+    data.frame(fuente = fuente, curvas = n_curvas_eda,
+               pentada_min = media_eda$pentada[minimo], DE_min_mm = desviacion_eda[[fuente]][minimo],
+               pentada_max = media_eda$pentada[maximo], DE_max_mm = desviacion_eda[[fuente]][maximo]))
+}
+# Diferencia máxima entre la varianza manual y var() de R (mm²)
+error_varianza_eda
+# Diferencia máxima entre la desviación estándar manual y sd() de R (mm)
+error_desviacion_eda
+# Resumen de la dispersión por fuente
+resumen_dispersion_eda
+
+# Dispersión de la precipitación por fuente
+par_dispersion_eda <- par(mfrow = c(1, 2))
+plot(varianza_eda$pentada, varianza_eda$terrestre, type = "l", lwd = 2, col = "steelblue",
+     ylim = c(0, max(varianza_eda$terrestre, varianza_eda$satelital)),
+     xlab = "Péntada", ylab = expression("Varianza (" * mm^2 * ")"), main = "Varianza funcional")
+lines(varianza_eda$pentada, varianza_eda$satelital, lwd = 2, lty = 2, col = "darkorange")
+legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange"),
+       lty = c(1, 2), lwd = 2, bty = "n")
+# En toda la gráfica, las curvas de estaciones se dispersan más alrededor de su media que las del satélite
+# La dispersión reúne diferencias entre lugares y entre años en una misma péntada
+# Este cálculo no separa las curvas por altitud ni por fase ENSO, por lo que no identifica
+# qué parte de la dispersión corresponde a diferencias entre estaciones o entre fases
+plot(desviacion_eda$pentada, desviacion_eda$terrestre, type = "l", lwd = 2, col = "steelblue",
+     ylim = c(0, max(desviacion_eda$terrestre, desviacion_eda$satelital)),
+     xlab = "Péntada", ylab = "Desviación estándar (mm)", main = "Desviación estándar funcional")
+lines(desviacion_eda$pentada, desviacion_eda$satelital, lwd = 2, lty = 2, col = "darkorange")
+legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange"),
+       lty = c(1, 2), lwd = 2, bty = "n")
+# La desviación estándar muestra la misma dispersión en mm y aumenta hacia noviembre (en ambas fuentes)
+# Ese aumento coincide con el segundo pico de la media y señala mayor diferencia entre curvas en esa temporada
+# El máximo del satélite es 16,01 mm en la péntada 62; el de estaciones es 26,03 mm en la primera péntada
+# Entonces, dos picos de lluvia media no implican que la mayor dispersión ocurra siempre en esos dos picos
+par(par_dispersion_eda)
+
+
+# Covarianza y correlación funcionales de cada fuente
+pentadas_eda <- media_eda$pentada
+covarianza_eda <- list()
+correlacion_eda <- list()
+comprobacion_cov_cor_eda <- data.frame()
+for (fuente in names(curvas_eda_fd)) {
+  coefs_centrados_eda <- coeficientes_eda[[fuente]] - coeficientes_medios_eda[[fuente]]
+  covarianza_coefs_eda <- coefs_centrados_eda %*% t(coefs_centrados_eda) /
+    (ncol(coefs_centrados_eda) - 1)
+  Phi_eda <- eval.basis(pentadas_eda, bases_eda[[fuente]])
+  covarianza_eda[[fuente]] <- Phi_eda %*% covarianza_coefs_eda %*% t(Phi_eda)
+  correlacion_eda[[fuente]] <- covarianza_eda[[fuente]] /
+    outer(desviacion_eda[[fuente]], desviacion_eda[[fuente]])
+
+  covarianza_R <- eval.bifd(pentadas_eda, pentadas_eda, var.fd(curvas_eda_fd[[fuente]]))
+  correlacion_R <- cor.fd(pentadas_eda, curvas_eda_fd[[fuente]])
+  comprobacion_cov_cor_eda <- rbind(comprobacion_cov_cor_eda,
+    data.frame(fuente = fuente,
+               diferencia_covarianza_mm2 = max(abs(covarianza_eda[[fuente]] - covarianza_R)),
+               diferencia_correlacion = max(abs(correlacion_eda[[fuente]] - correlacion_R)),
+               diferencia_diagonal_mm2 = max(abs(diag(covarianza_eda[[fuente]]) - varianza_eda[[fuente]]))))
+}
+# Diferencias frente a las funciones de R y frente a la varianza en la diagonal
+comprobacion_cov_cor_eda
+
+# Curvas de nivel de covarianza y correlación por fuente
+niveles_cov_eda <- pretty(range(unlist(covarianza_eda)), n = 12)
+niveles_cor_eda <- seq(-1, 1, by = 0.1)
+par_cov_cor_eda <- par(mfrow = c(1, 2))
+contour(pentadas_eda, pentadas_eda, covarianza_eda$terrestre, levels = niveles_cov_eda,
+        xlab = "Péntada s", ylab = "Péntada t", main = "Covarianza de estaciones (mm²)")
+# Cada línea une cruces con igual covarianza; en la diagonal se lee la varianza de cada péntada
+# Las estaciones muestran covarianzas altas en los cruces entre péntadas cercanas a noviembre
+contour(pentadas_eda, pentadas_eda, covarianza_eda$satelital, levels = niveles_cov_eda,
+        xlab = "Péntada s", ylab = "Péntada t", main = "Covarianza de satélite (mm²)")
+# El satélite también muestra covarianzas altas alrededor de noviembre, en una escala de dispersión menor
+contour(pentadas_eda, pentadas_eda, correlacion_eda$terrestre, levels = niveles_cor_eda,
+        xlab = "Péntada s", ylab = "Péntada t", main = "Correlación de estaciones")
+# Las correlaciones más altas se ven cerca de la diagonal: los pares más lluviosos en una péntada tienden
+# a seguir entre los más lluviosos en las péntadas cercanas
+contour(pentadas_eda, pentadas_eda, correlacion_eda$satelital, levels = niveles_cor_eda,
+        xlab = "Péntada s", ylab = "Péntada t", main = "Correlación de satélite")
+# La franja de correlación alta cerca de la diagonal también aparece en satélite
+par(par_cov_cor_eda)
+
+# Covariación entre finales de abril y comienzos de noviembre
+covariacion_temporadas_eda <- data.frame()
+for (fuente in names(covarianza_eda)) {
+  s <- match(24, pentadas_eda)
+  t <- match(62, pentadas_eda)
+  covariacion_temporadas_eda <- rbind(covariacion_temporadas_eda,
+    data.frame(fuente = fuente, pentada_s = 24, pentada_t = 62,
+               covarianza_mm2 = covarianza_eda[[fuente]][s, t],
+               correlacion = correlacion_eda[[fuente]][s, t]))
+}
+covariacion_temporadas_eda
+# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 321,60 mm² en estaciones
+# y 160,02 mm² en satélite; las correlaciones son 0,79 y 0,84, respectivamente
+# Los pares estación-año con lluvia por encima de la media en abril tienden a estar también por encima
+# de la media de noviembre; la covarianza mayor de estaciones incluye su mayor dispersión
+# La correlación se calculó reuniendo estaciones y años; no muestra si la relación se mantiene
+# dentro de cada estación o al separar los años por fase ENSO
+
+
+# Primera derivada de las curvas de precipitación por péntada
+derivadas_eda <- list()
+derivada_media_eda <- data.frame(pentada = pentadas_eda)
+error_derivada_eda <- numeric()
+for (fuente in names(curvas_eda_fd)) {
+  derivadas_eda[[fuente]] <- eval.fd(pentadas_eda, curvas_eda_fd[[fuente]], Lfdobj = 1)
+  derivada_media_eda[[fuente]] <- as.vector(eval.fd(pentadas_eda, media_eda_fd[[fuente]], Lfdobj = 1))
+  error_derivada_eda[fuente] <- max(abs(derivada_media_eda[[fuente]] - rowMeans(derivadas_eda[[fuente]])))
+}
+# Diferencia máxima entre derivar la media y promediar las derivadas
+error_derivada_eda
+
+# Tramos delimitados por los cambios de signo de la primera derivada
+tramos_derivada_eda <- data.frame()
+for (fuente in names(curvas_eda_fd)) {
+  curva_media <- media_eda_fd[[fuente]]
+  pendiente_media <- function(t) as.vector(eval.fd(t, curva_media, Lfdobj = 1))
+  pendiente <- derivada_media_eda[[fuente]]
+  cambios <- which(diff(sign(pendiente)) != 0)
+  giros <- vapply(cambios, function(i) uniroot(pendiente_media, pentadas_eda[c(i, i + 1)])$root,
+                  numeric(1))
+  limites <- sort(unique(c(min(pentadas_eda), giros, max(pentadas_eda))))
+  inicio <- head(limites, -1)
+  fin <- tail(limites, -1)
+  tramos_derivada_eda <- rbind(tramos_derivada_eda,
+    data.frame(fuente = fuente, inicio_pentada = inicio, fin_pentada = fin,
+               signo_pendiente = sign(pendiente_media((inicio + fin) / 2)),
+               lluvia_inicio_mm = as.vector(eval.fd(inicio, curva_media)),
+               lluvia_fin_mm = as.vector(eval.fd(fin, curva_media))))
+}
+tramos_derivada_eda
+
+# En los tramos de descenso de mitad de año, la media baja de 29,57 a 12,12 mm en estaciones
+# y de 37,33 a 12,15 mm en satélite
+# El valle conserva lluvia. corresponde al periodo menos lluvioso entre las dos temporadas del ciclo bimodal
+
+# Inicio y fin según los cruces con la lluvia media del año
+umbral_lluvia_eda <- colMeans(media_eda[pentadas_eda %in% tiempos, names(curvas_eda_fd)])
+cruces_lluvia_eda <- data.frame()
+temporadas_lluvia_eda <- data.frame()
+for (fuente in names(curvas_eda_fd)) {
+  anomalia_eda <- media_eda[[fuente]] - umbral_lluvia_eda[fuente]
+  cambios_eda <- diff(anomalia_eda > 0)
+  indices_cruce <- which(cambios_eda != 0)
+  if (!length(indices_cruce)) next
+
+  # Interpolación entre los puntos que encierran cada cruce
+  pentada_cruce <- pentadas_eda[indices_cruce] -
+    anomalia_eda[indices_cruce] * diff(pentadas_eda)[indices_cruce] / diff(anomalia_eda)[indices_cruce]
+  pendiente_cruce <- as.vector(eval.fd(pentada_cruce, media_eda_fd[[fuente]], Lfdobj = 1))
+  tipo_cruce <- rep("Indeterminado", length(indices_cruce))
+  tipo_cruce[cambios_eda[indices_cruce] > 0 & pendiente_cruce > 0] <- "Inicio"
+  tipo_cruce[cambios_eda[indices_cruce] < 0 & pendiente_cruce < 0] <- "Fin"
+
+  # Tramos con inicio y fin dentro del año
+  inicios <- which(head(tipo_cruce, -1) == "Inicio" & tail(tipo_cruce, -1) == "Fin")
+  temporada_cruce <- rep(NA_integer_, length(tipo_cruce))
+  temporada_cruce[inicios] <- temporada_cruce[inicios + 1] <- seq_along(inicios)
+  cruces_lluvia_eda <- rbind(cruces_lluvia_eda,
+    data.frame(fuente = fuente, pentada = pentada_cruce, tipo = tipo_cruce,
+               pendiente = pendiente_cruce, temporada = temporada_cruce))
+  temporadas_lluvia_eda <- rbind(temporadas_lluvia_eda,
+    data.frame(fuente = rep(fuente, length(inicios)), temporada = seq_along(inicios),
+               inicio_pentada = pentada_cruce[inicios], fin_pentada = pentada_cruce[inicios + 1]))
+}
+umbral_lluvia_eda
+cruces_lluvia_eda
+temporadas_lluvia_eda
+# Con umbrales de 23,36 mm en estaciones y 25,07 mm en satélite, los dos tramos completos abarcan
+# aproximadamente marzo-junio y septiembre-diciembre, con los picos de abril-mayo y noviembre dentro de ellos
+# Son periodos por encima del promedio de cada fuente; sus límites dependen del umbral y del suavizado
+# El cruce ascendente del satélite cerca de la péntada 71 queda sin cierre dentro del año
+# Estas fechas corresponden a la media de la red
+
+# Primera derivada de la media de estaciones y satélite
+plot(pentadas_eda, derivada_media_eda$terrestre, type = "l", lwd = 2, col = "steelblue",
+     ylim = range(0, derivada_media_eda[-1]), xlab = "Péntada",
+     ylab = "Cambio (mm por péntada)", main = "Primera derivada de la lluvia media")
+lines(pentadas_eda, derivada_media_eda$satelital, lwd = 2, lty = 2, col = "darkorange")
+abline(h = 0, lty = 3)
+legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange"),
+       lty = c(1, 2), lwd = 2, bty = "n")
+# Por encima de cero, la lluvia media aumenta; por debajo, disminuye
+# En estaciones, la subida de comienzos de año empieza entre la cuarta y la quinta péntada
+# Después del primer pico, la lluvia baja hasta cerca de la péntada 44 en estaciones y de la 41 en satélite
+# Las dos fuentes vuelven a subir hacia el pico de noviembre y después bajan
+# Los dos tramos principales de aumento describen la entrada hacia los máximos del ciclo bimodal
+# La pendiente negativa después de cada máximo indica que disminuye la cantidad de lluvia por péntada,
+# aunque todavía puede estar por encima del umbral de la temporada lluviosa
+
+
+
+# Profundidad de Fraiman-Muniz y boxplot funcional con MBD
+profundidades_eda <- data.frame()
+boxplot_eda <- list()
+limites_boxplot_eda <- range(unlist(valores_eda))
+par_boxplot_eda <- par(mfrow = c(1, 2))
+for (fuente in names(valores_eda)) {
+  valores <- valores_eda[[fuente]]
+  datos_fdata <- fda.usc::fdata(t(valores), pentadas_eda, range(pentadas_eda))
+  profundidad_FM <- fda.usc::depth.FM(datos_fdata)$dep
+
+  # Las bandas cerradas incluyen las curvas que coinciden con sus límites
+  n_curvas <- ncol(valores)
+  n_bandas <- choose(n_curvas, 2)
+  bandas_que_contienen <- apply(valores, 1, function(lluvia) {
+    debajo <- rank(lluvia, ties.method = "min") - 1
+    encima <- n_curvas - rank(lluvia, ties.method = "max")
+    n_bandas - choose(debajo, 2) - choose(encima, 2)
+  })
+  profundidad_MBD <- rowMeans(bandas_que_contienen) / n_bandas
+
+  boxplot_eda[[fuente]] <- fda::fbplot(valores, pentadas_eda, method = "MBD",
+                                      depth = profundidad_MBD, prob = 0.5, factor = 1.5,
+                                      xlab = "Péntada", ylab = "Precipitación (mm)",
+                                      xlim = range(pentadas_eda), ylim = limites_boxplot_eda)
+  title(c(terrestre = "Estaciones", satelital = "Satélite")[fuente])
+
+  indices <- match(colnames(valores), metadatos_eda$curva)
+  profundidades_eda <- rbind(profundidades_eda,
+    data.frame(fuente = fuente, metadatos_eda[indices, c("STATION_ID", "YEAR", "pixel", "curva")],
+               FM = unname(profundidad_FM), MBD = profundidad_MBD,
+               atipica = seq_len(n_curvas) %in% boxplot_eda[[fuente]]$outpoint))
+}
+par(par_boxplot_eda)
+# La caja contiene el 50 % central de las curvas; las líneas rojas discontinuas son las señaladas como atípicas
+
+# Identificación de curvas atípicas por estación y año
+profundidades_eda <- as_tibble(profundidades_eda)
+profundidades_eda
+# En cada fuente, una profundidad mayor indica una curva más central respecto al conjunto de estaciones y años
+# FM y MBD resumen la posición de toda la curva; un pico en noviembre puede ser parte del patrón habitual
+# La profundidad no identifica por sí misma una fase ENSO ni una condición de relieve
+atipicas_eda <- profundidades_eda %>%
+  filter(atipica) %>%
+  arrange(fuente, STATION_ID, YEAR) %>%
+  select(-atipica) %>%
+  left_join(metadatos_eda[, c("curva", "altitud")], by = "curva") %>%
+  rename(altitud_m = altitud) %>%
+  left_join(enso_anual[, c("YEAR", "secuencia_fases")], by = "YEAR") %>%
+  as.data.frame()
+atipicas_eda
+# Hay casos señalados en 1987 (El Niño), 1990 (neutral) y 1999 (La Niña), según la clasificación ONI previa
+# También aparecen en años de transición, como 1988; asignar una sola fase a todo ese año ocultaría el cambio
+# Estos casos muestran que las curvas atípicas no aparecen exclusivamente en una fase ENSO
+# La secuencia anual no identifica en qué fase ocurrió el tramo de la curva que salió de la banda
+resumen_atipicas_eda <- profundidades_eda %>%
+  group_by(fuente) %>%
+  summarize(curvas = n(), atipicas = sum(atipica), porcentaje = 100 * mean(atipica), .groups = "drop")
+resumen_atipicas_eda
+# El boxplot señala 56 pares estación-año en estaciones y 26 en satélite
+# Representan el 1,95 % y el 0,91 % de las curvas de cada fuente, respectivamente
+
+atipicas_por_estacion_eda <- profundidades_eda %>%
+  group_by(fuente, STATION_ID) %>%
+  summarize(curvas = n(), atipicas = sum(atipica), .groups = "drop") %>%
+  filter(atipicas > 0) %>%
+  left_join(unique(metadatos_eda[, c("STATION_ID", "altitud")]), by = "STATION_ID") %>%
+  rename(altitud_m = altitud) %>%
+  arrange(fuente, desc(atipicas))
+atipicas_por_estacion_eda
+# En tierra, la estación 5301500106, a 232 m, aparece señalada en sus 15 años disponibles
+# La estación 5301000104, a 20 m, aparece en sus 10 años en tierra y en 9 de los 10 en satélite
+# La repetición muestra que el boxplot detecta diferencias que persisten de algunos sitios frente a la red,
+# además de posibles años excepcionales; la marca no significa necesariamente un año anómalo para ese sitio
+# Hay casos terrestres a 20 m y a 2100 m, y estaciones sin altitud registrada
+
+
+
 ##### Verificación del emparejamiento estación-píxel #####
 par(mfrow = c(1, 1), mar = c(4, 4, 2, 1))
 
