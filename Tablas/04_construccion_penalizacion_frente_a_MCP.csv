@@ -1,0 +1,5 @@
+"fuente","metodo","parametro","VC","sesgo_total_pct"
+"estaciones","Penalizacion","log10 lambda = 2.5",752.778751465365,-4.54888157294055e-13
+"estaciones","MCP","K = 6",770.837909318135,-4.5511620094029
+"satelite","Penalizacion","log10 lambda = 1.75",135.562164900795,-6.17559683299757e-13
+"satelite","MCP","K = 11",140.629535748915,-0.933753562819867

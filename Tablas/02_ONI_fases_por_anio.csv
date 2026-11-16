@@ -1,0 +1,24 @@
+"YEAR","ventanas_nino","ventanas_nina","ventanas_neutral","secuencia_fases","cambio_fase","nino_y_nina"
+1981,0,0,12,"Neutral",FALSE,FALSE
+1982,8,0,4,"Neutral-> El Niño",TRUE,FALSE
+1983,6,3,3,"El Niño-> Neutral-> La Niña",TRUE,TRUE
+1984,0,5,7,"La Niña-> Neutral-> La Niña",TRUE,FALSE
+1985,0,6,6,"La Niña-> Neutral",TRUE,FALSE
+1986,5,0,7,"Neutral-> El Niño",TRUE,FALSE
+1987,12,0,0,"El Niño",FALSE,FALSE
+1988,1,8,3,"El Niño-> Neutral-> La Niña",TRUE,TRUE
+1989,0,5,7,"La Niña-> Neutral",TRUE,FALSE
+1990,0,0,12,"Neutral",FALSE,FALSE
+1991,8,0,4,"Neutral-> El Niño",TRUE,FALSE
+1992,6,0,6,"El Niño-> Neutral",TRUE,FALSE
+1993,0,0,12,"Neutral",FALSE,FALSE
+1994,4,0,8,"Neutral-> El Niño",TRUE,FALSE
+1995,3,5,4,"El Niño-> Neutral-> La Niña",TRUE,TRUE
+1996,0,3,9,"La Niña-> Neutral",TRUE,FALSE
+1997,8,0,4,"Neutral-> El Niño",TRUE,FALSE
+1998,4,6,2,"El Niño-> Neutral-> La Niña",TRUE,TRUE
+1999,0,12,0,"La Niña",FALSE,FALSE
+2000,0,10,2,"La Niña-> Neutral-> La Niña",TRUE,FALSE
+2001,0,2,10,"La Niña-> Neutral",TRUE,FALSE
+2002,7,0,5,"Neutral-> El Niño",TRUE,FALSE
+2003,2,0,10,"El Niño-> Neutral",TRUE,FALSE
