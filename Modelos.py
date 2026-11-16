@@ -1,4 +1,3 @@
-# Mariana: codificador funcional y cabeza lineal; FPCA, pérdida y entrenamiento se integran después.
 import argparse
 import random
 from pathlib import Path
@@ -10,6 +9,10 @@ from torch import nn
 NEURONAS = (6, 7, 8)
 COMPONENTES = (4, 5, 6)
 SEMILLAS = (1, 2, 3)  # 0001, 0002, 0003
+# Parámetros ajustables: cambiar OCULTAS tras conocer los parámetros de la cabeza KAN
+OCULTAS = 8
+ACTIVACION = nn.Tanh
+
 
 # Datos exportados desde R
 def cargar_datos(carpeta='Curvas'):
@@ -91,7 +94,8 @@ class CabezaLineal(nn.Module):
         self.capa = nn.Linear(neuronas+2, m_fpca, dtype=torch.float64)
     def forward(self, h): return self.capa(h)
 
-class ModeloMariana(nn.Module):
+# Codificador funcional + cabeza lineal
+class ModeloCodificadorCabezaLineal(nn.Module):
     def __init__(self, gram, rugosidad, neuronas=8, m_fpca=5):
         super().__init__()
         self.codificador = CodificadorFuncional(gram, neuronas, rugosidad)
@@ -120,9 +124,8 @@ def verificar_equivalencia_lineal(modelo, c, cov, media_fpca, psi_fpca, toleranc
         if not np.isfinite(error) or error > tolerancia: raise AssertionError(f'Equivalencia incumplida: {error:.3e}')
         return error
 
-# Revisión de configuraciones sin entrenamiento
-
-def revisar_configuraciones(datos, W, R, cov_norm, normalizador, salida, neuronas, componentes, semillas):
+# Revisión de configuraciones de la cabeza lineal sin entrenamiento
+def revisar_configuraciones_cabeza_lineal(datos, W, R, cov_norm, normalizador, salida, neuronas, componentes, semillas):
     idx = np.flatnonzero(datos['particion'] == 'entrenamiento')[:16]
     c = torch.as_tensor(datos['c'][idx], dtype=torch.float64)
     cov = torch.as_tensor(cov_norm[idx], dtype=torch.float64)
@@ -131,10 +134,10 @@ def revisar_configuraciones(datos, W, R, cov_norm, normalizador, salida, neurona
         for m in componentes:
             for seed in semillas:
                 establecer_semilla(seed)
-                modelo = ModeloMariana(W, R, q, m)
+                modelo = ModeloCodificadorCabezaLineal(W, R, q, m)
                 if modelo(c, cov).shape != (len(idx), m): raise AssertionError('Dimensiones de salida incorrectas.')
                 parametros = [p.detach().clone() for p in modelo.parameters()]
-                establecer_semilla(seed); replica = ModeloMariana(W, R, q, m)
+                establecer_semilla(seed); replica = ModeloCodificadorCabezaLineal(W, R, q, m)
                 if not all(torch.equal(x, y) for x, y in zip(parametros, replica.parameters())):
                     raise AssertionError('Inicialización no reproducible.')
                 generador = torch.Generator().manual_seed(seed)
@@ -148,9 +151,29 @@ def revisar_configuraciones(datos, W, R, cov_norm, normalizador, salida, neurona
     print('Sin entrenamiento ni selección de q o M.')
     print('Único archivo generado:', salida/'normalizador_covariables.npz')
 
-# Ejecución
-def main():
-    parser = argparse.ArgumentParser(description='Codificador y cabeza lineal, parte de Mariana')
+# Cabeza MLP: recibe q características funcionales, altitud y ONI; produce M coordenadas FPCA
+class CabezaMLP(nn.Module):
+    def __init__(self, neuronas=8, m_fpca=5, ocultas=OCULTAS):
+        super().__init__()
+        if neuronas not in NEURONAS or m_fpca not in COMPONENTES or ocultas < 1:
+            raise ValueError('Se requiere q=6..8, M=4..6 y ocultas >= 1.')
+        self.red = nn.Sequential(nn.Linear(neuronas+2, ocultas), ACTIVACION(), nn.Linear(ocultas, m_fpca)).double()
+    def forward(self, h): return self.red(h)
+
+# Codificador funcional + cabeza MLP; el decodificador FPCA se conecta después
+class ModeloCodificadorCabezaMLP(nn.Module):
+    def __init__(self, gram, rugosidad, neuronas=8, m_fpca=5, ocultas=OCULTAS):
+        super().__init__()
+        self.codificador = CodificadorFuncional(gram, neuronas, rugosidad)
+        self.cabeza = CabezaMLP(neuronas, m_fpca, ocultas)
+    def forward(self, c, cov): return self.cabeza(self.codificador(c, cov))
+
+def contar_parametros(modulo): return sum(p.numel() for p in modulo.parameters() if p.requires_grad)
+
+
+# Ejecución: codificador funcional + cabeza lineal
+def main_cabeza_lineal():
+    parser = argparse.ArgumentParser(description='Codificador funcional y cabeza lineal')
     parser.add_argument('--datos', default='Curvas')
     parser.add_argument('--neuronas', type=int, choices=NEURONAS, help='Si se omite, prueba q=6,7,8.')
     parser.add_argument('--m-fpca', type=int, choices=COMPONENTES, help='Si se omite, prueba M=4,5,6.')
@@ -164,8 +187,50 @@ def main():
         print(f'{nombre}: {(datos["particion"] == nombre).sum()} curvas')
     print(f'Bases: satélite={W.shape[0]}, estaciones={datos["k_est"]}; Gram simétrica={np.allclose(W, W.T)}')
     print(f'Semillas: {", ".join(f"{s:04d}" for s in SEMILLAS)}')
-    revisar_configuraciones(datos, W, R, cov_norm, normalizador, Path(args.salida),
-                            (args.neuronas,) if args.neuronas else NEURONAS,
-                            (args.m_fpca,) if args.m_fpca else COMPONENTES, SEMILLAS)
+    revisar_configuraciones_cabeza_lineal(datos, W, R, cov_norm, normalizador, Path(args.salida),
+                                          (args.neuronas,) if args.neuronas else NEURONAS,
+                                          (args.m_fpca,) if args.m_fpca else COMPONENTES, SEMILLAS)
 
-if __name__ == '__main__': main()
+
+# Ejecución: codificador funcional + cabeza MLP
+def main_cabeza_mlp():
+    parser = argparse.ArgumentParser(description='Cabeza MLP: pruebas de integración sin entrenamiento')
+    parser.add_argument('--datos', default='Curvas')
+    parser.add_argument('--neuronas', type=int, choices=NEURONAS)
+    parser.add_argument('--m-fpca', type=int, choices=COMPONENTES)
+    parser.add_argument('--ocultas', type=int, default=OCULTAS, help='Ajustar según los parámetros de la cabeza KAN')
+    parser.add_argument('--parametros-kan', type=int, help='Parámetros de la CABEZA KAN para la misma q y M')
+    args = parser.parse_args()
+    if args.ocultas < 1: parser.error('--ocultas debe ser >= 1')
+    if args.parametros_kan is not None and (args.neuronas is None or args.m_fpca is None or args.parametros_kan < 1):
+        parser.error('Para comparar con KAN indica --neuronas, --m-fpca y --parametros-kan positivo.')
+    datos = cargar_datos(args.datos); W, R = matrices_integracion(datos['t'], datos['phi'])
+    normalizador = NormalizadorCovariables().ajustar(datos['cov'], datos['particion'])
+    cov_norm = normalizador.transformar(datos['cov'])
+    idx = np.flatnonzero(datos['particion'] == 'entrenamiento')[:16]
+    c = torch.as_tensor(datos['c'][idx], dtype=torch.float64)
+    cov = torch.as_tensor(cov_norm[idx], dtype=torch.float64)
+    opciones_q = (args.neuronas,) if args.neuronas else NEURONAS
+    opciones_m = (args.m_fpca,) if args.m_fpca else COMPONENTES
+    for q in opciones_q:
+        for m in opciones_m:
+            for semilla in SEMILLAS:
+                establecer_semilla(semilla); modelo = ModeloCodificadorCabezaMLP(W, R, q, m, args.ocultas)
+                s = modelo(c, cov)
+                if s.shape != (len(idx), m) or not torch.isfinite(s).all(): raise AssertionError('Salida MLP incorrecta.')
+                s.sum().backward()
+                if modelo.codificador.A.grad is None or modelo.cabeza.red[0].weight.grad is None:
+                    raise AssertionError('No fluye el gradiente hacia codificador y cabeza.')
+                parametros = [p.detach().clone() for p in modelo.parameters()]
+                establecer_semilla(semilla); copia = ModeloCodificadorCabezaMLP(W, R, q, m, args.ocultas)
+                if not all(torch.equal(a, b) for a, b in zip(parametros, copia.parameters())):
+                    raise AssertionError('Inicialización no reproducible.')
+            n = contar_parametros(modelo.cabeza)
+            print(f'q={q}, M={m}, ocultas={args.ocultas}: cabeza MLP={n} parámetros; 3 semillas correctas')
+            if args.parametros_kan is not None:
+                diferencia = abs(n-args.parametros_kan)/args.parametros_kan*100
+                print(f'KAN={args.parametros_kan}; diferencia={diferencia:.2f}% -> {"CUMPLE" if diferencia <= 10 else "NO CUMPLE"} (máximo 10%)')
+    print('Comprobaciones finalizadas. No se entrenó ni se generaron archivos.')
+
+
+if __name__ == '__main__': main_cabeza_mlp()
