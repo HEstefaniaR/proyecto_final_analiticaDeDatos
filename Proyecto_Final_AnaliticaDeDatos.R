@@ -948,115 +948,74 @@ guardar_figura("04_construccion_VC_penalizacion.png", 10, 5)
 par(mfrow = c(1, 1))
 
 
-# Construccion elegida: B-spline penalizada
-# B-spline cubica con K = 72 y penalizacion
+# Construccion elegida: B-spline con MCP
+# B-spline cubica, K con la menor VC en cada fuente y pesos de MCP
+estaciones_MCP <- tabla[tabla$fuente == "estaciones" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
+satelite_MCP <- tabla[tabla$fuente == "satelite" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
+K_estaciones <- estaciones_MCP$parametro[which.min(estaciones_MCP$VC)]
+K_satelite <- satelite_MCP$parametro[which.min(satelite_MCP$VC)]
+K_estaciones
+K_satelite
 
-Phi_bspline <- penalizadas[["B-spline"]]$Phi
-R_bspline <- penalizadas[["B-spline"]]$R
-
-# lambda con la menor VC en cada fuente
-penalizada_estaciones <- tabla[tabla$fuente == "estaciones" & tabla$base == "B-spline" &
-                                 tabla$metodo == "Penalizacion", ]
-penalizada_satelite <- tabla[tabla$fuente == "satelite" & tabla$base == "B-spline" &
-                               tabla$metodo == "Penalizacion", ]
-log_lambda_estaciones <- penalizada_estaciones$parametro[which.min(penalizada_estaciones$VC)]
-log_lambda_satelite <- penalizada_satelite$parametro[which.min(penalizada_satelite$VC)]
-lambda_estaciones <- 10^log_lambda_estaciones
-lambda_satelite <- 10^log_lambda_satelite
-log_lambda_estaciones
-log_lambda_satelite
-
-# ECM, VC y VCG frente a lambda
+# ECM, VC y VCG frente a K
 par(mfrow = c(2, 3))
 for (criterio in c("ECM", "VC", "VCG")) {
-  plot(penalizada_estaciones$parametro, penalizada_estaciones[[criterio]], type = "b", pch = 19,
-       xlab = expression(log[10](lambda)), ylab = criterio, main = paste(criterio, "- estaciones"))
-  abline(v = log_lambda_estaciones, lty = 3, col = "red")
+  plot(estaciones_MCP$parametro, estaciones_MCP[[criterio]], type = "b", pch = 19, xlab = "K", ylab = criterio,
+       main = paste(criterio, "- estaciones"))
+  abline(v = K_estaciones, lty = 3, col = "red")
 }
 for (criterio in c("ECM", "VC", "VCG")) {
-  plot(penalizada_satelite$parametro, penalizada_satelite[[criterio]], type = "b", pch = 19,
-       xlab = expression(log[10](lambda)), ylab = criterio, main = paste(criterio, "- satelite"))
-  abline(v = log_lambda_satelite, lty = 3, col = "red")
+  plot(satelite_MCP$parametro, satelite_MCP[[criterio]], type = "b", pch = 19, xlab = "K", ylab = criterio,
+       main = paste(criterio, "- satelite"))
+  abline(v = K_satelite, lty = 3, col = "red")
 }
-guardar_figura("04_construccion_criterios_lambda.png", 12, 7)
+guardar_figura("04_construccion_criterios_K.png", 12, 7)
 par(mfrow = c(1, 1))
 
-# Ajuste penalizado de cada curva con sus pentadas observadas
-ajuste_penalizado <- function(datos, Phi, R, lambda) {
+# Base de cada fuente y pesos de MCP (entrenamiento)
+base_estaciones <- crear_base("B-spline", K_estaciones)
+base_satelite <- crear_base("B-spline", K_satelite)
+Phi_estaciones <- eval.basis(tiempos, base_estaciones)
+Phi_satelite <- eval.basis(tiempos, base_satelite)
+pesos_estaciones <- pesos_MCP(Y_train, Phi_estaciones)
+pesos_satelite <- pesos_MCP(X_train, Phi_satelite)
+guardar_tabla(data.frame(pentada = tiempos, estaciones = pesos_estaciones, satelite = pesos_satelite),
+              "04_construccion_pesos_MCP.csv")
+
+# Ajuste MCP de cada curva con sus pentadas observadas
+# c = (Phi'W Phi)^-1 Phi'W y
+ajuste_MCP <- function(datos, Phi, pesos) {
   coeficientes <- matrix(NA, nrow(datos), ncol(Phi), dimnames = list(rownames(datos), NULL))
   ajustes <- matrix(NA, nrow(datos), 72, dimnames = dimnames(datos))
-  nu <- c()
   for (i in 1:nrow(datos)) {
     obs <- which(!is.na(datos[i, ]))
     P <- Phi[obs, ]
-    C <- solve(t(P) %*% P + lambda * R) %*% t(P)
-    coeficientes[i, ] <- C %*% datos[i, obs]
+    PW <- t(P * pesos[obs])
+    coeficientes[i, ] <- solve(PW %*% P) %*% PW %*% datos[i, obs]
     ajustes[i, ] <- Phi %*% coeficientes[i, ]
-    nu[i] <- sum(diag(P %*% C))
   }
-  list(coeficientes = coeficientes, ajustes = ajustes, residuos = datos - ajustes, nu = nu)
+  list(coeficientes = coeficientes, ajustes = ajustes, residuos = datos - ajustes)
 }
 
-construccion_estaciones <- ajuste_penalizado(Y_train, Phi_bspline, R_bspline, lambda_estaciones)
-construccion_satelite <- ajuste_penalizado(X_train, Phi_bspline, R_bspline, lambda_satelite)
+construccion_estaciones <- ajuste_MCP(Y_train, Phi_estaciones, pesos_estaciones)
+construccion_satelite <- ajuste_MCP(X_train, Phi_satelite, pesos_satelite)
 ajustes_estaciones <- construccion_estaciones$ajustes
 ajustes_satelite <- construccion_satelite$ajustes
 residuos_estaciones <- construccion_estaciones$residuos
 residuos_satelite <- construccion_satelite$residuos
 
-# Curvas de 1981 a 2003 (entrenamiento, validacion y prueba) con la misma base y el lambda elegido
+# Curvas de 1981 a 2003 (entrenamiento, validacion y prueba) con la misma base y los pesos elegidos
 construccion_completa <- list(
-  terrestre = ajuste_penalizado(Y_completa, Phi_bspline, R_bspline, lambda_estaciones),
-  satelital = ajuste_penalizado(X_completa, Phi_bspline, R_bspline, lambda_satelite))
+  terrestre = ajuste_MCP(Y_completa, Phi_estaciones, pesos_estaciones),
+  satelital = ajuste_MCP(X_completa, Phi_satelite, pesos_satelite))
 
 # Parametros elegidos
 parametros_construccion <- data.frame(
-  fuente = c("estaciones", "satelite"), base = "B-spline", orden = 4, K = 72,
-  log10_lambda = c(log_lambda_estaciones, log_lambda_satelite),
-  lambda = c(lambda_estaciones, lambda_satelite),
-  VC = c(min(penalizada_estaciones$VC), min(penalizada_satelite$VC)),
-  nu_promedio = c(mean(construccion_estaciones$nu), mean(construccion_satelite$nu)))
+  fuente = c("estaciones", "satelite"), base = "B-spline", metodo = "MCP", orden = 4,
+  K = c(K_estaciones, K_satelite),
+  VC = c(min(estaciones_MCP$VC), min(satelite_MCP$VC)))
 parametros_construccion
-guardar_tabla(parametros_construccion, "04_construccion_lambda_elegido.csv")
-
-# Comparacion con MCP: VC y sesgo del total observado
-# Sesgo = (suma ajustada - suma observada) / suma observada, en las pentadas observadas
-sesgo_total <- function(datos, ajustes) {
-  100 * (sum(ajustes[!is.na(datos)]) - sum(datos, na.rm = TRUE)) / sum(datos, na.rm = TRUE)
-}
-
-ajuste_MCP <- function(datos, Phi, pesos) {
-  ajustes <- matrix(NA, nrow(datos), 72)
-  for (i in 1:nrow(datos)) {
-    obs <- which(!is.na(datos[i, ]))
-    P <- Phi[obs, ]
-    ajustes[i, ] <- Phi %*% solve(t(P * pesos[obs]) %*% P) %*% t(P * pesos[obs]) %*% datos[i, obs]
-  }
-  ajustes
-}
-
-estaciones_MCP <- tabla[tabla$fuente == "estaciones" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
-satelite_MCP <- tabla[tabla$fuente == "satelite" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
-K_estaciones_MCP <- estaciones_MCP$parametro[which.min(estaciones_MCP$VC)]
-K_satelite_MCP <- satelite_MCP$parametro[which.min(satelite_MCP$VC)]
-Phi_estaciones_MCP <- eval.basis(tiempos, crear_base("B-spline", K_estaciones_MCP))
-Phi_satelite_MCP <- eval.basis(tiempos, crear_base("B-spline", K_satelite_MCP))
-
-comparacion_metodos <- data.frame(
-  fuente = c("estaciones", "estaciones", "satelite", "satelite"),
-  metodo = c("Penalizacion", "MCP", "Penalizacion", "MCP"),
-  parametro = c(paste("log10 lambda =", log_lambda_estaciones), paste("K =", K_estaciones_MCP),
-                paste("log10 lambda =", log_lambda_satelite), paste("K =", K_satelite_MCP)),
-  VC = c(min(penalizada_estaciones$VC), min(estaciones_MCP$VC),
-         min(penalizada_satelite$VC), min(satelite_MCP$VC)),
-  sesgo_total_pct = c(sesgo_total(Y_train, ajustes_estaciones),
-                      sesgo_total(Y_train, ajuste_MCP(Y_train, Phi_estaciones_MCP,
-                                                      pesos_MCP(Y_train, Phi_estaciones_MCP))),
-                      sesgo_total(X_train, ajustes_satelite),
-                      sesgo_total(X_train, ajuste_MCP(X_train, Phi_satelite_MCP,
-                                                      pesos_MCP(X_train, Phi_satelite_MCP)))))
-comparacion_metodos
-guardar_tabla(comparacion_metodos, "04_construccion_penalizacion_frente_a_MCP.csv")
+guardar_tabla(parametros_construccion, "04_construccion_K_elegido.csv")
 
 # Verificacion de la matriz suavizadora con una curva completa
 i <- which(rowSums(is.na(Y_train)) == 0)[1]
@@ -1064,41 +1023,45 @@ verificacion_S <- data.frame()
 for (f in c("estaciones", "satelite")) {
   if (f == "estaciones") {
     y <- Y_train[i, ]
-    lambda <- lambda_estaciones
+    Phi <- Phi_estaciones
+    base <- base_estaciones
+    pesos <- pesos_estaciones
   } else {
     y <- X_train[i, ]
-    lambda <- lambda_satelite
+    Phi <- Phi_satelite
+    base <- base_satelite
+    pesos <- pesos_satelite
   }
-  y2cMap <- solve(t(Phi_bspline) %*% Phi_bspline + lambda * R_bspline) %*% t(Phi_bspline)
-  S <- Phi_bspline %*% y2cMap
-  
+  PW <- t(Phi * pesos)
+  y2cMap <- solve(PW %*% Phi) %*% PW
+  S <- Phi %*% y2cMap
+
   # Validacion cruzada: atajo con s_ii y dejando una pentada por fuera
   VC_atajo <- mean(((y - S %*% y) / (1 - diag(S)))^2)
   prediccion <- c()
   for (j in 1:72) {
-    P <- Phi_bspline[-j, ]
-    coeficientes <- solve(t(P) %*% P + lambda * R_bspline) %*% t(P) %*% y[-j]
-    prediccion[j] <- Phi_bspline[j, ] %*% coeficientes
+    PW <- t(Phi[-j, ] * pesos[-j])
+    coeficientes <- solve(PW %*% Phi[-j, ]) %*% PW %*% y[-j]
+    prediccion[j] <- Phi[j, ] %*% coeficientes
   }
   VC_dejar_uno <- mean((y - prediccion)^2)
-  
+
   # Comparacion con smooth.basis
-  ajuste_fda <- smooth.basis(tiempos, y, fdPar(base_bspline, 2, lambda))
-  
+  ajuste_fda <- smooth.basis(tiempos, y, base, wtvec = pesos)
+
   verificacion_S <- rbind(verificacion_S,
                           data.frame(fuente = f, curva = rownames(Y_train)[i],
-                                     simetria = max(abs(S - t(S))),
                                      idempotencia = max(abs(S %*% S - S)),
-                                     nu = sum(diag(S)),
-                                     nu_fda = ajuste_fda$df,
+                                     traza = sum(diag(S)), K = ncol(Phi),
                                      diferencia_coeficientes_fda = max(abs(y2cMap %*% y - ajuste_fda$fd$coefs)),
                                      VC_atajo = VC_atajo, VC_dejar_uno = VC_dejar_uno))
 }
 verificacion_S
 guardar_tabla(verificacion_S, "04_construccion_verificacion_S.csv")
+# Con MCP, S es idempotente y tr(S) = K
 
 
-# Residuos de la construccion penalizada
+# Residuos de la construccion elegida
 # Autocorrelacion de rezago 1 en las curvas completas
 completas_estaciones <- rowSums(is.na(Y_train)) == 0
 completas_satelite <- rowSums(is.na(X_train)) == 0
@@ -1156,13 +1119,13 @@ guardar_tabla(valores_negativos, "04_construccion_valores_negativos.csv")
 
 
 # Varianza residual y bandas
-# Varianza residual de cada curva: SCE / (n - nu)
+# Varianza residual de cada curva: SCE / (n - K)
 varianza_residual <- data.frame(
   curva = rownames(Y_train),
   estaciones = rowSums(residuos_estaciones^2, na.rm = TRUE) /
-    (rowSums(!is.na(Y_train)) - construccion_estaciones$nu),
+    (rowSums(!is.na(Y_train)) - K_estaciones),
   satelite = rowSums(residuos_satelite^2, na.rm = TRUE) /
-    (rowSums(!is.na(X_train)) - construccion_satelite$nu))
+    (rowSums(!is.na(X_train)) - K_satelite))
 summary(varianza_residual[, c("estaciones", "satelite")])
 
 boxplot(varianza_residual[, c("estaciones", "satelite")], names = c("Estaciones", "Satélite"), log = "y",
@@ -1184,10 +1147,11 @@ sigma2_estaciones <- colMeans(residuos_estaciones^2, na.rm = TRUE)
 sigma2_satelite <- colMeans(residuos_satelite^2, na.rm = TRUE)
 
 # Varianza de la curva ajustada
-varianza_ajuste <- function(y, Phi, R, lambda, sigma2) {
+varianza_ajuste <- function(y, Phi, pesos, sigma2) {
   obs <- which(!is.na(y))
   P <- Phi[obs, ]
-  PhiC <- Phi %*% solve(t(P) %*% P + lambda * R) %*% t(P)
+  PW <- t(P * pesos[obs])
+  PhiC <- Phi %*% solve(PW %*% P) %*% PW
   as.vector(PhiC^2 %*% sigma2[obs])
 }
 
@@ -1228,8 +1192,8 @@ for (curva in curvas_bandas) {
   par(mfrow = c(1, 2))
   y <- Y_train[curva, ]
   x <- X_train[curva, ]
-  EE_estacion <- sqrt(varianza_ajuste(y, Phi_bspline, R_bspline, lambda_estaciones, sigma2_estaciones))
-  EE_satelite <- sqrt(varianza_ajuste(x, Phi_bspline, R_bspline, lambda_satelite, sigma2_satelite))
+  EE_estacion <- sqrt(varianza_ajuste(y, Phi_estaciones, pesos_estaciones, sigma2_estaciones))
+  EE_satelite <- sqrt(varianza_ajuste(x, Phi_satelite, pesos_satelite, sigma2_satelite))
   limites <- range(y, x, ajustes_estaciones[curva, ] + 2 * EE_estacion, ajustes_estaciones[curva, ] - 2 * EE_estacion,
                    ajustes_satelite[curva, ] + 2 * EE_satelite, ajustes_satelite[curva, ] - 2 * EE_satelite, na.rm = TRUE)
   
@@ -1238,7 +1202,7 @@ for (curva in curvas_bandas) {
   lines(tiempos, ajustes_estaciones[curva, ], col = "steelblue", lwd = 2)
   lines(tiempos, ajustes_estaciones[curva, ] - 2 * EE_estacion, col = "steelblue", lty = 2)
   lines(tiempos, ajustes_estaciones[curva, ] + 2 * EE_estacion, col = "steelblue", lty = 2)
-  legend("topright", c("Observado", "Ajuste penalizado", "± 2 EE"), col = c("black", "steelblue", "steelblue"),
+  legend("topright", c("Observado", "Ajuste MCP", "± 2 EE"), col = c("black", "steelblue", "steelblue"),
          pch = c(16, NA, NA), lty = c(NA, 1, 2), bty = "n", cex = 0.8)
   
   plot(tiempos, x, pch = 16, cex = 0.65, ylim = limites, xlab = "Péntada", ylab = "Precipitación (mm)",
@@ -1246,7 +1210,7 @@ for (curva in curvas_bandas) {
   lines(tiempos, ajustes_satelite[curva, ], col = "darkorange", lwd = 2)
   lines(tiempos, ajustes_satelite[curva, ] - 2 * EE_satelite, col = "darkorange", lty = 2)
   lines(tiempos, ajustes_satelite[curva, ] + 2 * EE_satelite, col = "darkorange", lty = 2)
-  legend("topright", c("Observado", "Ajuste penalizado", "± 2 EE"), col = c("black", "darkorange", "darkorange"),
+  legend("topright", c("Observado", "Ajuste MCP", "± 2 EE"), col = c("black", "darkorange", "darkorange"),
          pch = c(16, NA, NA), lty = c(NA, 1, 2), bty = "n", cex = 0.8)
   guardar_figura(paste0("04_construccion_bandas_", curva, ".png"), 11, 5)
 }
@@ -1269,7 +1233,7 @@ plot(1:72, Media_original, type = "l", lwd = 2, col = "black",
      main = "Sensibilidad de la diferencia funcional")
 lines(1:72, Media_funcional, col = "red", lwd = 2)
 abline(h = 0, lty = 3)
-legend("topright", c("Datos originales", "B-spline penalizada"), col = c("black", "red"), lwd = 2, bty = "n")
+legend("topright", c("Datos originales", "B-spline MCP"), col = c("black", "red"), lwd = 2, bty = "n")
 guardar_figura("04_construccion_sensibilidad_diferencia.png", 8, 5)
 
 # Diferencia introducida por el suavizado y concordancia en el signo
@@ -1382,7 +1346,7 @@ legend("topleft", c("Observado", colnames(medias_val)), lty = c(2, rep(1, length
 # Curvas de 1981 a 2003
 metadatos_eda <- metadatos_completos
 fuentes_eda <- list(terrestre = Y_completa, satelital = X_completa)
-bases_eda <- list(terrestre = base_bspline, satelital = base_bspline)
+bases_eda <- list(terrestre = base_estaciones, satelital = base_satelite)
 
 # Coeficientes por columnas: filas = funciones base, columnas = curvas
 coeficientes_eda <- list(terrestre = t(construccion_completa$terrestre$coeficientes),
@@ -1503,7 +1467,7 @@ legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange
        lty = c(1, 2), lwd = 2, bty = "n")
 # La desviación estándar muestra la misma dispersión en mm y aumenta hacia noviembre (en ambas fuentes)
 # Ese aumento coincide con el segundo pico de la media y señala mayor diferencia entre curvas en esa temporada
-# El máximo del satélite es 14,17 mm en la péntada 62; el de estaciones es 22,13 mm en la primera péntada
+# El máximo del satélite es 16,01 mm en la péntada 62; el de estaciones es 26,03 mm en la primera péntada
 # Entonces, dos picos de lluvia media no implican que la mayor dispersión ocurra siempre en esos dos picos
 guardar_figura("05_exploratorio_varianza_desviacion.png", 12, 5)
 par(par_dispersion_eda)
@@ -1569,8 +1533,8 @@ for (fuente in names(covarianza_eda)) {
 }
 covariacion_temporadas_eda
 guardar_tabla(covariacion_temporadas_eda, "05_exploratorio_covariacion_abril_noviembre.csv")
-# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 301,06 mm² en estaciones
-# y 134,66 mm² en satélite; las correlaciones son 0,75 y 0,84, respectivamente
+# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 321,60 mm² en estaciones
+# y 160,02 mm² en satélite; las correlaciones son 0,79 y 0,84, respectivamente
 # Los pares estación-año con lluvia por encima de la media en abril tienden a estar también por encima
 # de la media de noviembre; la covarianza mayor de estaciones incluye su mayor dispersión
 # La correlación se calculó reuniendo estaciones y años; no muestra si la relación se mantiene
@@ -1610,8 +1574,8 @@ for (fuente in names(curvas_eda_fd)) {
 tramos_derivada_eda
 guardar_tabla(tramos_derivada_eda, "05_exploratorio_tramos_derivada.csv")
 
-# En los tramos de descenso de mitad de año, la media baja de 31,73 a 13,52 mm en estaciones
-# y de 36,88 a 13,07 mm en satélite
+# En los tramos de descenso de mitad de año, la media baja de 29,57 a 12,12 mm en estaciones
+# y de 37,33 a 12,15 mm en satélite
 # El valle conserva lluvia; corresponde al periodo menos lluvioso entre las dos temporadas del ciclo bimodal
 
 # Inicio y fin según los cruces con la lluvia media del año
@@ -1648,9 +1612,10 @@ cruces_lluvia_eda
 temporadas_lluvia_eda
 guardar_tabla(cruces_lluvia_eda, "05_exploratorio_cruces_umbral_lluvia.csv")
 guardar_tabla(temporadas_lluvia_eda, "05_exploratorio_temporadas_lluvia.csv")
-# Con umbrales de 24,24 mm en estaciones y 25,28 mm en satélite, los dos tramos completos abarcan
+# Con umbrales de 23,36 mm en estaciones y 25,07 mm en satélite, los dos tramos completos abarcan
 # aproximadamente marzo-junio y septiembre-diciembre, con los picos de abril-mayo y noviembre dentro de ellos
 # Son periodos por encima del promedio de cada fuente; sus límites dependen del umbral y del suavizado
+# El cruce ascendente del satélite cerca de la péntada 71 queda sin cierre dentro del año
 # Estas fechas corresponden a la media de la red
 
 # Primera derivada de la media de estaciones y satélite
@@ -1663,8 +1628,8 @@ legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange
        lty = c(1, 2), lwd = 2, bty = "n")
 guardar_figura("05_exploratorio_derivada_media.png", 8, 5)
 # Por encima de cero, la lluvia media aumenta; por debajo, disminuye
-# En las dos fuentes la lluvia media sube desde la primera péntada hasta el primer pico
-# Después del primer pico, la lluvia baja hasta cerca de la péntada 42 en estaciones y de la 41 en satélite
+# En estaciones, la subida de comienzos de año empieza entre la cuarta y la quinta péntada
+# Después del primer pico, la lluvia baja hasta cerca de la péntada 44 en estaciones y de la 41 en satélite
 # Las dos fuentes vuelven a subir hacia el pico de noviembre y después bajan
 # Los dos tramos principales de aumento describen la entrada hacia los máximos del ciclo bimodal
 # La pendiente negativa después de cada máximo indica que disminuye la cantidad de lluvia por péntada,
@@ -1734,8 +1699,8 @@ resumen_atipicas_eda <- profundidades_eda %>%
   summarize(curvas = n(), atipicas = sum(atipica), porcentaje = 100 * mean(atipica), .groups = "drop")
 resumen_atipicas_eda
 guardar_tabla(resumen_atipicas_eda, "05_exploratorio_resumen_atipicas.csv")
-# El boxplot señala 53 pares estación-año en estaciones y 26 en satélite
-# Representan el 1,85 % y el 0,91 % de las curvas de cada fuente, respectivamente
+# El boxplot señala 56 pares estación-año en estaciones y 26 en satélite
+# Representan el 1,95 % y el 0,91 % de las curvas de cada fuente, respectivamente
 
 atipicas_por_estacion_eda <- profundidades_eda %>%
   group_by(fuente, STATION_ID) %>%
@@ -1754,8 +1719,9 @@ guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.
 
 
 ##### Curvas para Python #####
-# Curvas penalizadas de 1981 a 2003 con la misma base para las dos fuentes
-nombres_coeficientes <- paste0("c", sprintf("%02d", 1:72))
+# Curvas MCP de 1981 a 2003; cada fuente tiene su propia base
+nombres_estaciones <- paste0("c", sprintf("%02d", 1:K_estaciones))
+nombres_satelite <- paste0("c", sprintf("%02d", 1:K_satelite))
 nombres_pentadas <- paste0("P", sprintf("%02d", tiempos))
 
 # Metadatos de cada curva estacion-año
@@ -1770,12 +1736,12 @@ table(metadatos_python$particion)
 # Coeficientes (filas = curvas, columnas = funciones base)
 coeficientes_estaciones <- data.frame(curva = pares_eda, t(coeficientes_eda$terrestre))
 coeficientes_satelite <- data.frame(curva = pares_eda, t(coeficientes_eda$satelital))
-names(coeficientes_estaciones)[-1] <- nombres_coeficientes
-names(coeficientes_satelite)[-1] <- nombres_coeficientes
+names(coeficientes_estaciones)[-1] <- nombres_estaciones
+names(coeficientes_satelite)[-1] <- nombres_satelite
 
 # Curvas evaluadas en las 72 pentadas
-curvas_estaciones <- data.frame(curva = pares_eda, t(Phi_bspline %*% coeficientes_eda$terrestre))
-curvas_satelite <- data.frame(curva = pares_eda, t(Phi_bspline %*% coeficientes_eda$satelital))
+curvas_estaciones <- data.frame(curva = pares_eda, t(Phi_estaciones %*% coeficientes_eda$terrestre))
+curvas_satelite <- data.frame(curva = pares_eda, t(Phi_satelite %*% coeficientes_eda$satelital))
 names(curvas_estaciones)[-1] <- nombres_pentadas
 names(curvas_satelite)[-1] <- nombres_pentadas
 
@@ -1785,11 +1751,16 @@ observado_satelite <- data.frame(curva = pares_eda, fuentes_eda$satelital[pares_
 names(observado_estaciones)[-1] <- nombres_pentadas
 names(observado_satelite)[-1] <- nombres_pentadas
 
-# Base B-spline: nodos y valores en una malla fina para calcular la matriz de Gram por cuadratura
-nodos_bspline <- data.frame(nodo = c(0, base_bspline$params, 72))
+# Bases B-spline: nodos y valores en una malla fina para calcular la matriz de Gram por cuadratura
+nodos_estaciones <- data.frame(nodo = c(0, base_estaciones$params, 72))
+nodos_satelite <- data.frame(nodo = c(0, base_satelite$params, 72))
 malla_fina <- seq(0, 72, by = 0.1)
-base_malla_fina <- data.frame(t = malla_fina, eval.basis(malla_fina, base_bspline))
-names(base_malla_fina)[-1] <- nombres_coeficientes
+malla_estaciones <- data.frame(t = malla_fina, eval.basis(malla_fina, base_estaciones))
+malla_satelite <- data.frame(t = malla_fina, eval.basis(malla_fina, base_satelite))
+names(malla_estaciones)[-1] <- nombres_estaciones
+names(malla_satelite)[-1] <- nombres_satelite
+write.csv(data.frame(pentada = tiempos, estaciones = pesos_estaciones, satelite = pesos_satelite),
+          "Curvas/pesos_MCP.csv", row.names = FALSE)
 
 write.csv(metadatos_python, "Curvas/metadatos_curvas.csv", row.names = FALSE, fileEncoding = "UTF-8")
 write.csv(coeficientes_estaciones, "Curvas/coeficientes_estaciones.csv", row.names = FALSE)
@@ -1798,13 +1769,15 @@ write.csv(curvas_estaciones, "Curvas/curvas_estaciones_72_pentadas.csv", row.nam
 write.csv(curvas_satelite, "Curvas/curvas_satelite_72_pentadas.csv", row.names = FALSE)
 write.csv(observado_estaciones, "Curvas/observado_estaciones.csv", row.names = FALSE)
 write.csv(observado_satelite, "Curvas/observado_satelite.csv", row.names = FALSE)
-write.csv(nodos_bspline, "Curvas/base_bspline_nodos.csv", row.names = FALSE)
-write.csv(base_malla_fina, "Curvas/base_bspline_malla_fina.csv", row.names = FALSE)
+write.csv(nodos_estaciones, "Curvas/base_estaciones_nodos.csv", row.names = FALSE)
+write.csv(nodos_satelite, "Curvas/base_satelite_nodos.csv", row.names = FALSE)
+write.csv(malla_estaciones, "Curvas/base_estaciones_malla_fina.csv", row.names = FALSE)
+write.csv(malla_satelite, "Curvas/base_satelite_malla_fina.csv", row.names = FALSE)
 write.csv(parametros_construccion, "Curvas/parametros_construccion.csv", row.names = FALSE)
 
 # Comprobacion: las curvas exportadas coinciden con la base por los coeficientes
 max(abs(as.matrix(curvas_estaciones[, -1]) -
-          as.matrix(coeficientes_estaciones[, -1]) %*% t(Phi_bspline)))
+          as.matrix(coeficientes_estaciones[, -1]) %*% t(Phi_estaciones)))
 
 
 
