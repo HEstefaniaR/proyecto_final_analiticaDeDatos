@@ -284,6 +284,70 @@ def ajustar_simbolica(capa, salida, entrada, x):
     return coeficientes, ajuste, r2
 
 
+# Decodificador FPCA
+# Curvas de estaciones evaluadas en las 72 pentadas y coeficientes en su base
+def cargar_curvas_estaciones(carpeta='Curvas'):
+    carpeta = Path(carpeta)
+    meta = pd.read_csv(carpeta / 'metadatos_curvas.csv', dtype={'curva': str})
+    curvas = pd.read_csv(carpeta / 'curvas_estaciones_72_pentadas.csv', dtype={'curva': str})
+    coefs = pd.read_csv(carpeta / 'coeficientes_estaciones.csv', dtype={'curva': str})
+    base = pd.read_csv(carpeta / 'base_estaciones_malla_fina.csv')
+    datos = meta[['curva', 'particion']].merge(curvas, on='curva', validate='one_to_one')
+    datos = datos.merge(coefs, on='curva', validate='one_to_one')
+    pentadas = [c for c in curvas if c != 'curva']
+    columnas = [c for c in coefs if c != 'curva']
+    # Base de estaciones en las pentadas 1, ..., 72 (la malla fina va de 0 a 72 con paso 0,1)
+    filas = [int(np.argmin(np.abs(base.t.to_numpy() - t))) for t in range(1, 73)]
+    phi = base.loc[filas, columnas].to_numpy(dtype=np.float64)
+    return {'curva': datos.curva.to_numpy(), 'particion': datos.particion.to_numpy(),
+            'y': datos[pentadas].to_numpy(dtype=np.float64), 'c': datos[columnas].to_numpy(dtype=np.float64),
+            'phi': phi}
+
+# FPCA discretizada: media mu(t) -> SVD -> autofunciones phi_k(t) y varianza explicada
+# Las curvas ya vienen suavizadas, por eso no se suavizan de nuevo
+def fit_fpca(curvas, n_componentes):
+    Y = np.asarray(curvas, dtype=np.float64)
+    media = Y.mean(0)
+    _, sing, Vt = np.linalg.svd(Y - media, full_matrices=False)
+    Vt = Vt * np.sign(Vt.sum(1, keepdims=True) + 1e-12)   # fija el signo (la SVD es ambigua en +-)
+    explicada = sing**2 / np.sum(sing**2)
+    return {'media': media, 'base': Vt[:n_componentes], 'explicada': explicada}
+
+# Decodificador funcional: puntajes s (B, M) -> curva y(t) = mu(t) + sum_m s_m psi_m(t)  (B, 72)
+# mu y psi son buffers: viajan en el state_dict pero NO se entrenan
+class DecodificadorFPCA(nn.Module):
+    def __init__(self, n_puntos=72, m_fpca=5):
+        super().__init__()
+        if m_fpca not in COMPONENTES: raise ValueError(f'Componentes permitidas: {COMPONENTES}')
+        self.register_buffer('media', torch.zeros(n_puntos, dtype=torch.float64))
+        self.register_buffer('base', torch.zeros(m_fpca, n_puntos, dtype=torch.float64))
+    def fijar_fpca(self, fpca):
+        self.media.copy_(torch.as_tensor(fpca['media'])); self.base.copy_(torch.as_tensor(fpca['base']))
+        return self
+    def forward(self, puntajes): return self.media + puntajes @ self.base
+    def proyectar(self, curvas): return (curvas - self.media) @ self.base.T
+
+# Coeficientes de mu y psi en la base de estaciones (para la perdida (c_hat - c)' W (c_hat - c))
+# Las curvas viven en el espacio de las K funciones base, asi que hay a lo sumo K componentes
+def coeficientes_fpca(fpca, phi):
+    mu_c = np.linalg.lstsq(phi, fpca['media'], rcond=None)[0]
+    psi_c = np.linalg.lstsq(phi, fpca['base'].T, rcond=None)[0].T
+    error = max(np.abs(phi @ mu_c - fpca['media']).max(), np.abs(psi_c @ phi.T - fpca['base']).max())
+    return mu_c, psi_c, error
+
+# Varianza explicada y piso de reconstruccion en validacion para cada M
+def tabla_componentes(curvas, fpca):
+    entrenamiento = curvas['y'][curvas['particion'] == 'entrenamiento']
+    validacion = curvas['y'][curvas['particion'] == 'validacion']
+    filas = []
+    for m in range(1, fpca['base'].shape[0] + 1):
+        psi = fpca['base'][:m]
+        reconstruida = fpca['media'] + (validacion - fpca['media']) @ psi.T @ psi
+        filas.append({'M': m, 'varianza_explicada_acumulada': fpca['explicada'][:m].sum(),
+                      'piso_RMSE_validacion_mm': np.sqrt(np.mean((reconstruida - validacion)**2))})
+    return pd.DataFrame(filas), len(entrenamiento)
+
+
 # Ejecución: codificador funcional + cabeza lineal
 def main_cabeza_lineal():
     parser = argparse.ArgumentParser(description='Codificador funcional y cabeza lineal')
@@ -345,6 +409,35 @@ def main_cabeza_mlp():
                 print(f'KAN={args.parametros_kan}; diferencia={diferencia:.2f}% -> {"CUMPLE" if diferencia <= 10 else "NO CUMPLE"} (máximo 10%)')
     print('Comprobaciones finalizadas. No se entrenó ni se generaron archivos.')
     return datos, W, R, cov_norm, opciones_q, opciones_m
+
+
+# Ejecución: decodificador FPCA ajustado solo con entrenamiento
+def main_decodificador():
+    parser = argparse.ArgumentParser(description='Decodificador FPCA de las curvas de estaciones')
+    parser.add_argument('--datos', default='Curvas')
+    parser.add_argument('--salida', default='Resultados_Modelos1')
+    args = parser.parse_args()
+    curvas = cargar_curvas_estaciones(args.datos)
+    entrenamiento = curvas['y'][curvas['particion'] == 'entrenamiento']
+    fpca = fit_fpca(entrenamiento, curvas['phi'].shape[1])
+    tabla, n_entrenamiento = tabla_componentes(curvas, fpca)
+    mu_c, psi_c, error_base = coeficientes_fpca(fpca, curvas['phi'])
+    print(f'FPCA con {n_entrenamiento} curvas de entrenamiento (1981-1995)')
+    print(tabla.round(4).to_string(index=False))
+    print(f'Diferencia máxima al pasar mu y psi a la base de estaciones: {error_base:.2e}')
+
+    # Verificacion: con M = todas las componentes, decodificar los puntajes reproduce la curva
+    decodificador = DecodificadorFPCA(72, max(COMPONENTES)).fijar_fpca(fpca)
+    y = torch.as_tensor(entrenamiento[:16])
+    print(f'Error de proyectar y decodificar (M = {max(COMPONENTES)}): '
+          f'{(decodificador(decodificador.proyectar(y)) - y).abs().max().item():.2e}')
+
+    salida = Path(args.salida); salida.mkdir(parents=True, exist_ok=True)
+    np.savez(salida / 'decodificador_fpca.npz', media=fpca['media'], base=fpca['base'],
+             explicada=fpca['explicada'], media_coeficientes=mu_c, base_coeficientes=psi_c)
+    Path('Tablas').mkdir(exist_ok=True)
+    tabla.to_csv('Tablas/07_decodificador_fpca_componentes.csv', index=False)
+    print('Archivos:', salida / 'decodificador_fpca.npz', 'y Tablas/07_decodificador_fpca_componentes.csv')
 
 
 if __name__ == '__main__':

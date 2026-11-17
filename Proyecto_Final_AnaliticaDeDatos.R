@@ -701,6 +701,7 @@ fuera <- unique(curvas[curvas$estado == "Fuera del raster", c("STATION_ID", "lon
 nrow(fuera)
 head(fuera)
 plot(p_sat[[1]], main = "Estaciones sobre el raster")
+lines(project(valle, crs(p_sat)), lwd = 2)
 points(puntos_r, pch = 16, cex = 0.6)
 points(vect(fuera, geom = c("longitud", "latitud"), crs = "EPSG:4326"), col = "red", pch = 17)
 guardar_figura("03_emparejamiento_estaciones_raster.png", 7, 7)
