@@ -1718,6 +1718,89 @@ guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.
 # Hay casos terrestres a 20 m y a 2100 m, y estaciones sin altitud registrada
 
 
+##### Regresion funcional #####
+# Modelo funcion-funcion: Y_est(t) = b0(t) + integral de b1(s, t) X_sat(s) ds
+# Se ajusta con entrenamiento (1981-1995); lambda se elige con validacion (1996-2000)
+particion_completa <- ifelse(metadatos_completos$YEAR <= 1995, "entrenamiento",
+                             ifelse(metadatos_completos$YEAR <= 2000, "validacion", "prueba"))
+idx_entrenamiento <- which(particion_completa == "entrenamiento")
+idx_validacion <- which(particion_completa == "validacion")
+idx_prueba <- which(particion_completa == "prueba")
+
+satelite_fd <- fd(t(construccion_completa$satelital$coeficientes), base_satelite)
+estaciones_fd <- fd(t(construccion_completa$terrestre$coeficientes), base_estaciones)
+
+# Bases de beta_0(t) y beta_1(s, t): la base de estaciones en t y la de satelite en s
+beta0Par <- fdPar(base_estaciones, int2Lfd(2), 0)
+
+Ajuste_linmod <- function(lam) {
+  beta1bifd <- bifd(matrix(0, K_satelite, K_estaciones), base_satelite, base_estaciones)
+  beta1Par <- bifdPar(beta1bifd, int2Lfd(2), int2Lfd(2), lam, lam)
+  linmod(satelite_fd[idx_entrenamiento], estaciones_fd[idx_entrenamiento], list(beta0Par, beta1Par))
+}
+
+# Prediccion en las 72 pentadas; la integral sobre s se aproxima en el punto medio de cada pentada
+puntos_medios <- seq(0.5, 71.5, 1)
+predecir_linmod <- function(ajuste, idx) {
+  b0 <- eval.fd(tiempos, ajuste$beta0estfd)
+  B1 <- eval.bifd(puntos_medios, tiempos, ajuste$beta1estbifd)
+  X <- eval.fd(puntos_medios, satelite_fd[idx])
+  as.vector(b0) + t(B1) %*% X
+}
+
+# Eleccion de lambda (comun en s y t) con el error en validacion
+loglam_regresion <- seq(-2, 8, 1)
+ECM_validacion <- c()
+Y_validacion <- eval.fd(tiempos, estaciones_fd[idx_validacion])
+for (l in seq_along(loglam_regresion)) {
+  ajuste <- Ajuste_linmod(10^loglam_regresion[l])
+  ECM_validacion[l] <- mean((Y_validacion - predecir_linmod(ajuste, idx_validacion))^2)
+}
+seleccion_regresion <- data.frame(log10_lambda = loglam_regresion, ECM_validacion, RMSE_validacion = sqrt(ECM_validacion))
+seleccion_regresion
+guardar_tabla(seleccion_regresion, "06_regresion_seleccion_lambda.csv")
+loglam_regresion_opt <- loglam_regresion[which.min(ECM_validacion)]
+
+plot(loglam_regresion, sqrt(ECM_validacion), type = "b", pch = 19, xlab = expression(log[10](lambda)),
+     ylab = "RMSE en validacion (mm)", main = "Eleccion de lambda")
+abline(v = loglam_regresion_opt, lty = 3, col = "red")
+guardar_figura("06_regresion_seleccion_lambda.png", 7, 5)
+
+ajuste_regresion <- Ajuste_linmod(10^loglam_regresion_opt)
+
+# R2(t) en entrenamiento
+Y_entrenamiento <- eval.fd(tiempos, estaciones_fd[idx_entrenamiento])
+Yhat_entrenamiento <- predecir_linmod(ajuste_regresion, idx_entrenamiento)
+R2_t <- 1 - rowSums((Y_entrenamiento - Yhat_entrenamiento)^2) /
+  rowSums((Y_entrenamiento - rowMeans(Y_entrenamiento))^2)
+mean(R2_t)
+
+# Error de la regresion y del satelite sin corregir en validacion
+X_validacion <- eval.fd(tiempos, satelite_fd[idx_validacion])
+errores_regresion <- data.frame(
+  modelo = c("Regresion funcional", "Satelite sin corregir"),
+  RMSE_validacion_mm = c(sqrt(min(ECM_validacion)), sqrt(mean((Y_validacion - X_validacion)^2))),
+  R2_medio_entrenamiento = c(mean(R2_t), NA))
+errores_regresion
+guardar_tabla(errores_regresion, "06_regresion_errores.csv")
+
+par(mfrow = c(1, 2))
+plot(tiempos, R2_t, type = "l", lwd = 2, xlab = "Pentada", ylab = expression(R^2), ylim = c(0, 1),
+     main = expression(R^2 * "(t) en entrenamiento"))
+B1_regresion <- eval.bifd(puntos_medios, tiempos, ajuste_regresion$beta1estbifd)
+contour(puntos_medios, tiempos, B1_regresion, xlab = "s: pentada del satelite", ylab = "t: pentada de la estacion",
+        main = expression(hat(beta)[1](s, t)), nlevels = 12)
+abline(0, 1, lty = 2, col = "red")
+guardar_figura("06_regresion_beta_y_R2.png", 11, 5)
+par(mfrow = c(1, 1))
+
+# Predicciones de validacion y prueba
+prediccion_regresion <- data.frame(curva = rownames(construccion_completa$terrestre$coeficientes)[c(idx_validacion, idx_prueba)],
+                                   t(predecir_linmod(ajuste_regresion, c(idx_validacion, idx_prueba))))
+names(prediccion_regresion)[-1] <- paste0("P", sprintf("%02d", tiempos))
+write.csv(prediccion_regresion, "Curvas/regresion_funcional_predicciones.csv", row.names = FALSE)
+
+
 ##### Curvas para Python #####
 # Curvas MCP de 1981 a 2003; cada fuente tiene su propia base
 nombres_estaciones <- paste0("c", sprintf("%02d", 1:K_estaciones))
