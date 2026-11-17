@@ -12,6 +12,8 @@ SEMILLAS = (1, 2, 3)  # 0001, 0002, 0003
 # Parámetros ajustables: cambiar OCULTAS tras conocer los parámetros de la cabeza KAN
 OCULTAS = 8
 ACTIVACION = nn.Tanh
+OCULTAS_KAN = 2
+INTERVALOS_KAN = 12
 
 
 # Datos exportados desde R
@@ -171,6 +173,117 @@ class ModeloCodificadorCabezaMLP(nn.Module):
 def contar_parametros(modulo): return sum(p.numel() for p in modulo.parameters() if p.requires_grad)
 
 
+# Aristas KAN con SiLU y B-splines cúbicos
+
+class CapaKAN(nn.Module):
+    def __init__(self, entradas, salidas, intervalos=INTERVALOS_KAN):
+        super().__init__()
+        if entradas < 1 or salidas < 1 or intervalos < 1:
+            raise ValueError('Entradas, salidas e intervalos deben ser positivos.')
+        self.entradas = entradas
+        self.salidas = salidas
+        self.intervalos = intervalos
+        self.grado = 3
+        nudos = -1 + 2 * torch.arange(-3, intervalos + 4, dtype=torch.float64) / intervalos
+        self.register_buffer('nudos', nudos)
+        self.register_buffer('centro', torch.zeros(entradas, dtype=torch.float64))
+        self.register_buffer('escala', torch.ones(entradas, dtype=torch.float64))
+        self.peso_base = nn.Parameter(torch.empty(salidas, entradas, dtype=torch.float64))
+        self.peso_spline = nn.Parameter(torch.ones(salidas, entradas, dtype=torch.float64))
+        self.coeficientes = nn.Parameter(torch.empty(salidas, entradas, intervalos + 3, dtype=torch.float64))
+        nn.init.xavier_uniform_(self.peso_base)
+        nn.init.normal_(self.coeficientes, std=0.1 / np.sqrt(entradas))
+
+    def bases(self, x):
+        # Recurrencia de Cox-de Boor sobre nudos uniformes extendidos
+        valores = x.unsqueeze(-1)
+        nudos = self.nudos
+        bases = ((valores >= nudos[:-1]) & (valores < nudos[1:])).to(x.dtype)
+        for grado in range(1, self.grado + 1):
+            izquierda = (valores - nudos[:-(grado + 1)]) / (nudos[grado:-1] - nudos[:-(grado + 1)])
+            derecha = (nudos[grado + 1:] - valores) / (nudos[grado + 1:] - nudos[1:-grado])
+            bases = izquierda * bases[..., :-1] + derecha * bases[..., 1:]
+        return bases
+
+    def forward(self, x):
+        normalizada = (x - self.centro) / self.escala
+        base = nn.functional.silu(normalizada) @ self.peso_base.T
+        coeficientes = self.peso_spline.unsqueeze(-1) * self.coeficientes
+        spline = torch.einsum('big,oig->bo', self.bases(normalizada), coeficientes)
+        return base + spline
+
+    @torch.no_grad()
+    def calibrar(self, x):
+        # Escala fija de cada entrada, calculada antes del ajuste con entrenamiento
+        if x.ndim != 2 or x.shape[1] != self.entradas or len(x) == 0 or not torch.isfinite(x).all():
+            raise ValueError('La calibración requiere entradas finitas (batch, entradas).')
+        minimo = x.amin(dim=0)
+        maximo = x.amax(dim=0)
+        self.centro.copy_((minimo + maximo) / 2)
+        amplitud = (maximo - minimo) / 2
+        self.escala.copy_(torch.where(amplitud > 0, amplitud, torch.ones_like(amplitud)))
+
+    @torch.no_grad()
+    def arista(self, salida, entrada, x):
+        normalizada = (x - self.centro[entrada]) / self.escala[entrada]
+        base = self.peso_base[salida, entrada] * nn.functional.silu(normalizada)
+        spline = self.bases(normalizada) @ self.coeficientes[salida, entrada]
+        return base + self.peso_spline[salida, entrada] * spline
+
+
+# Composición de dos capas KAN, de q+2 entradas a M coordenadas FPCA
+class CabezaKAN(nn.Module):
+    def __init__(self, neuronas=8, m_fpca=5, ocultas=OCULTAS_KAN, intervalos=INTERVALOS_KAN):
+        super().__init__()
+        if neuronas not in NEURONAS or m_fpca not in COMPONENTES:
+            raise ValueError('Se requiere q=6..8 y M=4..6.')
+        self.capas = nn.ModuleList([
+            CapaKAN(neuronas + 2, ocultas, intervalos),
+            CapaKAN(ocultas, m_fpca, intervalos),
+        ])
+
+    def forward(self, h):
+        for capa in self.capas:
+            h = capa(h)
+        return h
+
+    @torch.no_grad()
+    def calibrar(self, h):
+        for capa in self.capas:
+            capa.calibrar(h)
+            h = capa(h)
+
+
+class ModeloCodificadorCabezaKAN(nn.Module):
+    def __init__(self, gram, rugosidad, neuronas=8, m_fpca=5, ocultas=OCULTAS_KAN, intervalos=INTERVALOS_KAN):
+        super().__init__()
+        self.codificador = CodificadorFuncional(gram, neuronas, rugosidad)
+        self.cabeza = CabezaKAN(neuronas, m_fpca, ocultas, intervalos)
+
+    def forward(self, c, cov):
+        return self.cabeza(self.codificador(c, cov))
+
+
+@torch.no_grad()
+def ajustar_simbolica(capa, salida, entrada, x):
+    # Polinomio cúbico en la entrada normalizada de una arista
+    if x.ndim != 1 or len(x) < 8 or not torch.isfinite(x).all():
+        raise ValueError('El ajuste simbólico requiere una rejilla de al menos ocho puntos finitos.')
+    u = (x - capa.centro[entrada]) / capa.escala[entrada]
+    valores = capa.arista(salida, entrada, x)
+    matriz = torch.stack((torch.ones_like(u), u, u.square(), u.pow(3)), dim=1)
+    if torch.linalg.matrix_rank(matriz[::2]) < 4:
+        raise ValueError('El ajuste cúbico requiere cuatro columnas linealmente independientes.')
+    coeficientes = torch.linalg.lstsq(matriz[::2], valores[::2]).solution
+    ajuste = matriz @ coeficientes
+    variacion = (valores[1::2] - valores[1::2].mean()).square().sum()
+    # R² queda indefinido para una activación constante
+    r2 = float('nan')
+    if variacion > 0:
+        r2 = (1 - (valores[1::2] - ajuste[1::2]).square().sum() / variacion).item()
+    return coeficientes, ajuste, r2
+
+
 # Ejecución: codificador funcional + cabeza lineal
 def main_cabeza_lineal():
     parser = argparse.ArgumentParser(description='Codificador funcional y cabeza lineal')
@@ -231,6 +344,162 @@ def main_cabeza_mlp():
                 diferencia = abs(n-args.parametros_kan)/args.parametros_kan*100
                 print(f'KAN={args.parametros_kan}; diferencia={diferencia:.2f}% -> {"CUMPLE" if diferencia <= 10 else "NO CUMPLE"} (máximo 10%)')
     print('Comprobaciones finalizadas. No se entrenó ni se generaron archivos.')
+    return datos, W, R, cov_norm, opciones_q, opciones_m
 
 
-if __name__ == '__main__': main_cabeza_mlp()
+if __name__ == '__main__':
+    datos, W, R, cov_norm, opciones_q, opciones_m = main_cabeza_mlp()
+
+    # Resolución de la malla para el seno de la función sintética
+    torch.set_num_threads(1)
+    x_malla = torch.linspace(-1, 1, 1001, dtype=torch.float64)
+    x_intermedia = (x_malla[:-1] + x_malla[1:]) / 2
+    resolucion = []
+    for intervalos in (4, 8, 12, 16):
+        capa = CapaKAN(1, 1, intervalos)
+        coeficientes = torch.linalg.lstsq(capa.bases(x_malla), torch.sin(2 * torch.pi * x_malla)).solution
+        error = capa.bases(x_intermedia) @ coeficientes - torch.sin(2 * torch.pi * x_intermedia)
+        resolucion.append({'intervalos': intervalos, 'RMSE_aproximacion': error.square().mean().sqrt().item()})
+    tabla_resolucion = pd.DataFrame(resolucion)
+    print(tabla_resolucion.to_string(index=False))
+    # Doce intervalos reducen el error de aproximación del seno a cerca de 0,00115
+
+    # Comprobación sintética con ajuste, validación y verificación independientes
+    generador = torch.Generator().manual_seed(2026)
+    x_sintetica = 4 * torch.rand(2200, 8, generator=generador, dtype=torch.float64) - 2
+    funcion = torch.sin(torch.pi * x_sintetica[:, 0]) + x_sintetica[:, 1].square()
+    escalas_salida = torch.tensor([[0.5, 0.75, 1.0, 1.25]], dtype=torch.float64)
+    y_sintetica = funcion[:, None] * escalas_salida
+    x_ajuste, x_validacion, x_verificacion = x_sintetica[:1400], x_sintetica[1400:1800], x_sintetica[1800:]
+    y_ajuste, y_validacion, y_verificacion = y_sintetica[:1400], y_sintetica[1400:1800], y_sintetica[1800:]
+    resultados_sinteticos = []
+    for semilla in SEMILLAS:
+        establecer_semilla(semilla)
+        cabeza = CabezaKAN(neuronas=6, m_fpca=4)
+        cabeza.calibrar(x_ajuste)
+        optimizador = torch.optim.AdamW(cabeza.parameters(), lr=0.01, weight_decay=0)
+        mejor_validacion = float('inf')
+        sin_mejora = 0
+        for epoca in range(1, 4001):
+            cabeza.train()
+            optimizador.zero_grad(set_to_none=True)
+            perdida = (cabeza(x_ajuste) - y_ajuste).square().mean()
+            perdida.backward()
+            optimizador.step()
+            cabeza.eval()
+            with torch.no_grad():
+                perdida_validacion = (cabeza(x_validacion) - y_validacion).square().mean().item()
+            if perdida_validacion < mejor_validacion - 1e-10:
+                mejor_validacion = perdida_validacion
+                mejor_estado = {nombre: valor.detach().clone() for nombre, valor in cabeza.state_dict().items()}
+                mejor_epoca = epoca
+                sin_mejora = 0
+            else:
+                sin_mejora += 1
+            if sin_mejora >= 300:
+                break
+        cabeza.load_state_dict(mejor_estado)
+        with torch.no_grad():
+            error_verificacion = cabeza(x_verificacion) - y_verificacion
+            rmse_salida = error_verificacion.square().mean(dim=0).sqrt()
+            rmse = error_verificacion.square().mean().sqrt().item()
+        resultados_sinteticos.append({
+            'semilla': semilla, 'mejor_epoca': mejor_epoca,
+            'RMSE_validacion': np.sqrt(mejor_validacion), 'RMSE_verificacion': rmse,
+            'RMSE_max_salida': rmse_salida.max().item(),
+        })
+        print(f'KAN sintética, semilla {semilla:04d}, RMSE de verificación = {rmse:.6f}')
+        if semilla == SEMILLAS[0]:
+            cabeza_sintetica = cabeza
+    tabla_sintetica = pd.DataFrame(resultados_sinteticos)
+    print(tabla_sintetica.to_string(index=False))
+    print(tabla_sintetica[['RMSE_verificacion', 'RMSE_max_salida']].agg(['mean', 'std']).to_string())
+    assert np.isfinite(tabla_sintetica['RMSE_max_salida']).all()
+    assert tabla_sintetica['RMSE_max_salida'].le(0.01).all(), 'La KAN supera el RMSE sintético permitido.'
+    tabla_sintetica.to_csv('Tablas/06_KAN_sintetica.csv', index=False)
+    # Las tres semillas quedan por debajo de 0,01 en cada una de las cuatro salidas sintéticas
+
+    # Activaciones de la primera capa en el rango del ajuste sintético
+    import matplotlib.pyplot as plt
+    primera_capa = cabeza_sintetica.capas[0]
+    fig, axes = plt.subplots(1, 3, figsize=(13, 3.2))
+    for entrada, ax in enumerate(axes):
+        rejilla = torch.linspace(x_ajuste[:, entrada].min(), x_ajuste[:, entrada].max(), 200, dtype=torch.float64)
+        for salida in range(OCULTAS_KAN):
+            valores = primera_capa.arista(salida, entrada, rejilla)
+            ax.plot(rejilla.numpy(), (valores - valores.mean()).numpy(), label=f'Arista hacia h{salida + 1}')
+        ax.set_title(f'x{entrada + 1}')
+        ax.legend(fontsize=8)
+    plt.suptitle('Primera capa KAN · función sintética · semilla 0001')
+    plt.tight_layout()
+    fig.savefig('Figuras/06_KAN_activaciones_sinteticas.png', dpi=150)
+    plt.close(fig)
+    # En la semilla 0001, las aristas hacia h2 recuperan el seno de x1 y la curvatura de x2
+
+    # Ajuste simbólico de la arista de x2 hacia la primera neurona oculta
+    rejilla = torch.linspace(x_ajuste[:, 1].min(), x_ajuste[:, 1].max(), 200, dtype=torch.float64)
+    coef_simbolicos, _, r2_simbolico = ajustar_simbolica(primera_capa, 0, 1, rejilla)
+    tabla_simbolica = pd.DataFrame([{
+        'semilla': SEMILLAS[0], 'entrada': 1, 'salida': 0,
+        'centro': primera_capa.centro[1].item(), 'escala': primera_capa.escala[1].item(),
+        'a0': coef_simbolicos[0].item(), 'a1': coef_simbolicos[1].item(),
+        'a2': coef_simbolicos[2].item(), 'a3': coef_simbolicos[3].item(),
+        'R2_verificacion': r2_simbolico,
+    }])
+    print('Expresión de la arista sintética: a0 + a1*u + a2*u² + a3*u³, u = (x-centro)/escala')
+    print(tabla_simbolica.to_string(index=False))
+    # El polinomio aproxima la arista sintética con R² cercano a 0,908 en los puntos intercalados
+    tabla_simbolica.to_csv('Tablas/06_KAN_simbolica_sintetica.csv', index=False)
+
+    # Integración del codificador y la KAN con entradas de entrenamiento
+    idx_entrenamiento = datos['particion'] == 'entrenamiento'
+    c_entrenamiento = torch.as_tensor(datos['c'][idx_entrenamiento], dtype=torch.float64)
+    cov_entrenamiento = torch.as_tensor(cov_norm[idx_entrenamiento], dtype=torch.float64)
+    comprobaciones = []
+    parametros_cabezas = []
+    for q in opciones_q:
+        for m in opciones_m:
+            for semilla in SEMILLAS:
+                establecer_semilla(semilla)
+                modelo = ModeloCodificadorCabezaKAN(W, R, q, m)
+                with torch.no_grad():
+                    h_entrenamiento = modelo.codificador(c_entrenamiento, cov_entrenamiento)
+                    modelo.cabeza.calibrar(h_entrenamiento)
+                c_lote, cov_lote = c_entrenamiento[:16], cov_entrenamiento[:16]
+                coordenadas = modelo(c_lote, cov_lote)
+                coordenadas.square().mean().backward()
+                gradientes = all(
+                    p.grad is not None and torch.isfinite(p.grad).all().item() and p.grad.abs().sum().item() > 0
+                    for p in modelo.parameters()
+                )
+                establecer_semilla(semilla)
+                replica = ModeloCodificadorCabezaKAN(W, R, q, m)
+                with torch.no_grad():
+                    replica.cabeza.calibrar(replica.codificador(c_entrenamiento, cov_entrenamiento))
+                    error_replica = (coordenadas - replica(c_lote, cov_lote)).abs().max().item()
+                comprobaciones.append({
+                    'q': q, 'M': m, 'semilla': semilla,
+                    'dimensiones_correctas': coordenadas.shape == (len(c_lote), m),
+                    'salida_finita': torch.isfinite(coordenadas).all().item(),
+                    'gradientes_finitos_no_nulos': gradientes, 'error_replica': error_replica,
+                })
+            n_kan = contar_parametros(modelo.cabeza)
+            ocultas_mlp = max(1, round((n_kan - m) / (q + m + 3)))
+            n_mlp = contar_parametros(CabezaMLP(q, m, ocultas_mlp))
+            parametros_cabezas.append({
+                'q': q, 'M': m, 'ocultas_KAN': OCULTAS_KAN, 'intervalos': INTERVALOS_KAN,
+                'grado': 3, 'parametros_KAN': n_kan, 'ocultas_MLP': ocultas_mlp,
+                'parametros_MLP': n_mlp, 'diferencia_pct': 100 * abs(n_mlp - n_kan) / n_kan,
+                'parametros_codificador': contar_parametros(modelo.codificador),
+            })
+    tabla_comprobaciones = pd.DataFrame(comprobaciones)
+    print(tabla_comprobaciones.to_string(index=False))
+    assert tabla_comprobaciones[['dimensiones_correctas', 'salida_finita', 'gradientes_finitos_no_nulos']].all().all()
+    assert tabla_comprobaciones['error_replica'].eq(0).all()
+    # El gradiente alcanza el codificador y las dos capas KAN con inicializaciones reproducibles
+    tabla_comprobaciones.to_csv('Tablas/06_KAN_comprobaciones.csv', index=False)
+    tabla_parametros = pd.DataFrame(parametros_cabezas)
+    print(tabla_parametros.to_string(index=False))
+    assert tabla_parametros['diferencia_pct'].le(10).all()
+    tabla_parametros.to_csv('Tablas/06_KAN_parametros.csv', index=False)
+    print('La KAN devuelve M coordenadas latentes. Entrenamiento con lluvia pendiente del FPCA y la pérdida funcional.')
