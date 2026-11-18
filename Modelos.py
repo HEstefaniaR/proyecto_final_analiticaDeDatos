@@ -15,6 +15,19 @@ ACTIVACION = nn.Tanh
 OCULTAS_KAN = 2
 INTERVALOS_KAN = 12
 
+# Entrenamiento de la red funcional
+# Escala del modelo: 'raiz' (raiz de P) o 'log1p' (log(1 + P)), aplicada a la curva ya suavizada en mm;
+# con None no se entrena
+ESCALA = 'raiz'
+# Componentes del decodificador FPCA: M = 5 explica el 96 % de la varianza;
+# con M = 6 la FPCA reproduce completa la base de estaciones (K = 6) y no reduce la dimensión
+COMPONENTES_RED = (5,)
+# Malla de lambda para la penalización de rugosidad; se elige por validación
+LAMBDAS_RUGOSIDAD = (1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3, 1e4)
+EPOCAS_MAXIMAS = 3000
+PACIENCIA = 200
+TASA_APRENDIZAJE = 0.01
+
 
 # Datos exportados desde R
 def cargar_datos(carpeta='Curvas'):
@@ -348,14 +361,138 @@ def tabla_componentes(curvas, fpca):
     return pd.DataFrame(filas), len(entrenamiento)
 
 
+# Datos para entrenar: coeficientes en la escala del modelo
+# La curva MCP en mm se recorta en 0, se transforma y se escribe de nuevo en la misma base por mínimos cuadrados
+TRANSFORMACIONES = {'raiz': (np.sqrt, np.square), 'log1p': (np.log1p, np.expm1)}
+
+def coeficientes_en_escala(c_mm, phi_fina, escala):
+    curvas = TRANSFORMACIONES[escala][0](np.maximum(c_mm @ phi_fina.T, 0))
+    return np.linalg.lstsq(phi_fina, curvas.T, rcond=None)[0].T
+
+def cargar_datos_red(carpeta='Curvas', escala='raiz'):
+    carpeta = Path(carpeta)
+    leer = lambda archivo: pd.read_csv(carpeta / archivo, dtype={'curva': str, 'STATION_ID': str})
+    meta = leer('metadatos_curvas.csv')
+    orden = meta.curva.to_numpy()
+    coeficientes = lambda archivo: leer(archivo).set_index('curva').loc[orden].to_numpy(dtype=np.float64)
+    base_s = pd.read_csv(carpeta / 'base_satelite_malla_fina.csv')
+    base_e = pd.read_csv(carpeta / 'base_estaciones_malla_fina.csv')
+    t = base_s.t.to_numpy(dtype=np.float64)
+    filas = [int(np.argmin(np.abs(t - k))) for k in range(1, 73)]
+    phi_sat = base_s.drop(columns='t').to_numpy(dtype=np.float64)
+    phi_est = base_e.drop(columns='t').to_numpy(dtype=np.float64)
+    return {'meta': meta, 'particion': meta.particion.to_numpy(),
+            'cov': meta[['altitud_completa', 'oni_promedio']].to_numpy(dtype=np.float64),
+            'c_sat': coeficientes_en_escala(coeficientes('coeficientes_satelite.csv'), phi_sat, escala),
+            'c_est': coeficientes_en_escala(coeficientes('coeficientes_estaciones.csv'), phi_est, escala),
+            't': t, 'filas_pentadas': filas, 'phi_sat': phi_sat, 'phi_est': phi_est}
+
+# MLP con el número de neuronas ocultas que deja sus parámetros más cerca de los de la KAN
+# Parámetros del MLP: (q + 2) h + h + h M + M = h (q + M + 3) + M
+def neuronas_ocultas_mlp(q, m):
+    n_kan = contar_parametros(CabezaKAN(q, m))
+    return max(1, round((n_kan - m) / (q + m + 3)))
+
+def crear_modelo(cabeza, gram, rugosidad, q, m):
+    if cabeza == 'lineal': return ModeloCodificadorCabezaLineal(gram, rugosidad, q, m)
+    if cabeza == 'MLP': return ModeloCodificadorCabezaMLP(gram, rugosidad, q, m, neuronas_ocultas_mlp(q, m))
+    if cabeza == 'KAN': return ModeloCodificadorCabezaKAN(gram, rugosidad, q, m)
+    raise ValueError('Cabezas permitidas: lineal, MLP y KAN.')
+
+# FPCA de las curvas de estaciones de entrenamiento en las 72 pentadas
+# Los puntajes se escalan por su desviación estándar para que las M salidas de la cabeza tengan magnitud similar;
+# el decodificador multiplica de nuevo por esa desviación, así que la curva reconstruida es la misma
+def preparar_fpca(datos, m):
+    phi = datos['phi_est'][datos['filas_pentadas']]
+    curvas = datos['c_est'] @ phi.T
+    entrenamiento = curvas[datos['particion'] == 'entrenamiento']
+    fpca = fit_fpca(entrenamiento, m)
+    desviacion = ((entrenamiento - fpca['media']) @ fpca['base'].T).std(axis=0)
+    fpca_escalada = dict(fpca, base=fpca['base'] * desviacion[:, None])
+    mu_c, psi_c, error = coeficientes_fpca(fpca_escalada, phi)
+    return fpca_escalada, mu_c, psi_c, error
+
+# Pérdida L² funcional: (c_hat - c)' W (c_hat - c), con c_hat = mu_c + s psi_c en la base de estaciones,
+# más la penalización de rugosidad lambda * sum_k a_k' R a_k de las funciones de pesos w_k(t)
+class PerdidaFuncional(nn.Module):
+    def __init__(self, gram_estaciones, mu_c, psi_c, lam):
+        super().__init__()
+        self.register_buffer('gram', torch.as_tensor(gram_estaciones, dtype=torch.float64))
+        self.register_buffer('mu_c', torch.as_tensor(mu_c, dtype=torch.float64))
+        self.register_buffer('psi_c', torch.as_tensor(psi_c, dtype=torch.float64))
+        self.lam = lam
+    def coeficientes(self, puntajes): return self.mu_c + puntajes @ self.psi_c
+    def error_l2(self, puntajes, c):
+        diferencia = self.coeficientes(puntajes) - c
+        return ((diferencia @ self.gram) * diferencia).sum(dim=1).mean()
+    def forward(self, puntajes, c, codificador):
+        return self.error_l2(puntajes, c) + self.lam * codificador.penalizacion_rugosidad()
+
+# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L² de validación
+# La validación se evalúa en cada época; se guarda el estado con menor pérdida de validación
+def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e, fpca, mu_c, psi_c, cov_norm,
+                 epocas=EPOCAS_MAXIMAS, paciencia=PACIENCIA):
+    T = lambda x: torch.as_tensor(x, dtype=torch.float64)
+    tr, va = datos['particion'] == 'entrenamiento', datos['particion'] == 'validacion'
+    c_tr, h_tr, y_tr = T(datos['c_sat'][tr]), T(cov_norm[tr]), T(datos['c_est'][tr])
+    c_va, h_va, y_va = T(datos['c_sat'][va]), T(cov_norm[va]), T(datos['c_est'][va])
+    establecer_semilla(semilla)
+    modelo = crear_modelo(cabeza, gram_s, rugosidad_s, q, m)
+    if cabeza == 'KAN':
+        with torch.no_grad(): modelo.cabeza.calibrar(modelo.codificador(c_tr, h_tr))
+    perdida = PerdidaFuncional(gram_e, mu_c, psi_c, lam)
+    optimizador = torch.optim.AdamW(modelo.parameters(), lr=TASA_APRENDIZAJE, weight_decay=0)
+    mejor, mejor_epoca, mejor_estado, sin_mejora = np.inf, 0, None, 0
+    historia = []
+    for epoca in range(1, epocas + 1):
+        modelo.train(); optimizador.zero_grad(set_to_none=True)
+        valor = perdida(modelo(c_tr, h_tr), y_tr, modelo.codificador)
+        valor.backward(); optimizador.step()
+        modelo.eval()
+        with torch.no_grad(): validacion = perdida.error_l2(modelo(c_va, h_va), y_va).item()
+        historia.append((epoca, valor.item(), validacion))
+        if validacion < mejor - 1e-10:
+            mejor, mejor_epoca, sin_mejora = validacion, epoca, 0
+            mejor_estado = {k: v.detach().clone() for k, v in modelo.state_dict().items()}
+        else:
+            sin_mejora += 1
+            if sin_mejora >= paciencia: break
+    modelo.load_state_dict(mejor_estado)
+    return modelo, perdida, {'perdida_validacion': mejor, 'mejor_epoca': mejor_epoca, 'epocas': epoca,
+                             'parametros_cabeza': contar_parametros(modelo.cabeza),
+                             'parametros_codificador': contar_parametros(modelo.codificador)}, historia
+
+# Curva predicha en la malla fina: en la escala del modelo se recorta en 0 y luego se vuelve a mm
+def reconstruir_mm(c_escala, phi_fina, escala):
+    curva = c_escala @ phi_fina.T
+    recortados = 100 * np.mean(curva < 0)
+    return TRANSFORMACIONES[escala][1](np.maximum(curva, 0)), recortados
+
+# Equivalencia de la cabeza lineal con la regresión función a función:
+# y(t) = mu(t) + b psi(t) + [cov] B_cov psi(t) + integral beta(s, t) X(s) ds, con beta(s, t) = sum_k sum_m w_k(s) B_km psi_m(t)
+# La integral se calcula por cuadratura en la malla fina y se compara con la salida de la red
+@torch.no_grad()
+def verificar_regresion_funcional(modelo, datos, fpca, cov_norm, idx):
+    q = modelo.codificador.n_neuronas
+    A = modelo.codificador.A.numpy()
+    B, b = modelo.cabeza.capa.weight.numpy(), modelo.cabeza.capa.bias.numpy()
+    psi, mu = fpca['base'], fpca['media']
+    beta = (datos['phi_sat'] @ A.T) @ B[:, :q].T @ psi                       # beta(s, t): malla fina x 72 pentadas
+    X = datos['c_sat'][idx] @ datos['phi_sat'].T                              # X(s) en la malla fina
+    integral = np.trapezoid(X[:, :, None] * beta[None, :, :], datos['t'], axis=1)
+    regresion = mu + b @ psi + cov_norm[idx] @ B[:, q:].T @ psi + integral
+    red = (mu + modelo(torch.as_tensor(datos['c_sat'][idx]), torch.as_tensor(cov_norm[idx])).numpy() @ psi)
+    return np.abs(regresion - red).max(), beta
+
+
 # Ejecución: codificador funcional + cabeza lineal
-def main_cabeza_lineal():
+def main_cabeza_lineal(opciones=()):
     parser = argparse.ArgumentParser(description='Codificador funcional y cabeza lineal')
     parser.add_argument('--datos', default='Curvas')
     parser.add_argument('--neuronas', type=int, choices=NEURONAS, help='Si se omite, prueba q=6,7,8.')
     parser.add_argument('--m-fpca', type=int, choices=COMPONENTES, help='Si se omite, prueba M=4,5,6.')
     parser.add_argument('--salida', default='Resultados_Modelos1')
-    args = parser.parse_args()
+    args = parser.parse_args(list(opciones))
     datos = cargar_datos(args.datos); W, R = matrices_integracion(datos['t'], datos['phi'])
     if np.linalg.eigvalsh(W).min() <= 0: raise AssertionError('Gram no es definida positiva.')
     normalizador = NormalizadorCovariables().ajustar(datos['cov'], datos['particion'])
@@ -370,14 +507,14 @@ def main_cabeza_lineal():
 
 
 # Ejecución: codificador funcional + cabeza MLP
-def main_cabeza_mlp():
+def main_cabeza_mlp(opciones=()):
     parser = argparse.ArgumentParser(description='Cabeza MLP: pruebas de integración sin entrenamiento')
     parser.add_argument('--datos', default='Curvas')
     parser.add_argument('--neuronas', type=int, choices=NEURONAS)
     parser.add_argument('--m-fpca', type=int, choices=COMPONENTES)
     parser.add_argument('--ocultas', type=int, default=OCULTAS, help='Ajustar según los parámetros de la cabeza KAN')
     parser.add_argument('--parametros-kan', type=int, help='Parámetros de la CABEZA KAN para la misma q y M')
-    args = parser.parse_args()
+    args = parser.parse_args(list(opciones))
     if args.ocultas < 1: parser.error('--ocultas debe ser >= 1')
     if args.parametros_kan is not None and (args.neuronas is None or args.m_fpca is None or args.parametros_kan < 1):
         parser.error('Para comparar con KAN indica --neuronas, --m-fpca y --parametros-kan positivo.')
@@ -412,11 +549,11 @@ def main_cabeza_mlp():
 
 
 # Ejecución: decodificador FPCA ajustado solo con entrenamiento
-def main_decodificador():
+def main_decodificador(opciones=()):
     parser = argparse.ArgumentParser(description='Decodificador FPCA de las curvas de estaciones')
     parser.add_argument('--datos', default='Curvas')
     parser.add_argument('--salida', default='Resultados_Modelos1')
-    args = parser.parse_args()
+    args = parser.parse_args(list(opciones))
     curvas = cargar_curvas_estaciones(args.datos)
     entrenamiento = curvas['y'][curvas['particion'] == 'entrenamiento']
     fpca = fit_fpca(entrenamiento, curvas['phi'].shape[1])
@@ -440,159 +577,124 @@ def main_decodificador():
     print('Archivos:', salida / 'decodificador_fpca.npz', 'y Tablas/07_decodificador_fpca_componentes.csv')
 
 
-if __name__ == '__main__':
-    datos, W, R, cov_norm, opciones_q, opciones_m = main_cabeza_mlp()
-
-    # Resolución de la malla para el seno de la función sintética
-    torch.set_num_threads(1)
-    x_malla = torch.linspace(-1, 1, 1001, dtype=torch.float64)
-    x_intermedia = (x_malla[:-1] + x_malla[1:]) / 2
-    resolucion = []
-    for intervalos in (4, 8, 12, 16):
-        capa = CapaKAN(1, 1, intervalos)
-        coeficientes = torch.linalg.lstsq(capa.bases(x_malla), torch.sin(2 * torch.pi * x_malla)).solution
-        error = capa.bases(x_intermedia) @ coeficientes - torch.sin(2 * torch.pi * x_intermedia)
-        resolucion.append({'intervalos': intervalos, 'RMSE_aproximacion': error.square().mean().sqrt().item()})
-    tabla_resolucion = pd.DataFrame(resolucion)
-    print(tabla_resolucion.to_string(index=False))
-    # Doce intervalos reducen el error de aproximación del seno a cerca de 0,00115
-
-    # Comprobación sintética con ajuste, validación y verificación independientes
-    generador = torch.Generator().manual_seed(2026)
-    x_sintetica = 4 * torch.rand(2200, 8, generator=generador, dtype=torch.float64) - 2
-    funcion = torch.sin(torch.pi * x_sintetica[:, 0]) + x_sintetica[:, 1].square()
-    escalas_salida = torch.tensor([[0.5, 0.75, 1.0, 1.25]], dtype=torch.float64)
-    y_sintetica = funcion[:, None] * escalas_salida
-    x_ajuste, x_validacion, x_verificacion = x_sintetica[:1400], x_sintetica[1400:1800], x_sintetica[1800:]
-    y_ajuste, y_validacion, y_verificacion = y_sintetica[:1400], y_sintetica[1400:1800], y_sintetica[1800:]
-    resultados_sinteticos = []
-    for semilla in SEMILLAS:
-        establecer_semilla(semilla)
-        cabeza = CabezaKAN(neuronas=6, m_fpca=4)
-        cabeza.calibrar(x_ajuste)
-        optimizador = torch.optim.AdamW(cabeza.parameters(), lr=0.01, weight_decay=0)
-        mejor_validacion = float('inf')
-        sin_mejora = 0
-        for epoca in range(1, 4001):
-            cabeza.train()
-            optimizador.zero_grad(set_to_none=True)
-            perdida = (cabeza(x_ajuste) - y_ajuste).square().mean()
-            perdida.backward()
-            optimizador.step()
-            cabeza.eval()
-            with torch.no_grad():
-                perdida_validacion = (cabeza(x_validacion) - y_validacion).square().mean().item()
-            if perdida_validacion < mejor_validacion - 1e-10:
-                mejor_validacion = perdida_validacion
-                mejor_estado = {nombre: valor.detach().clone() for nombre, valor in cabeza.state_dict().items()}
-                mejor_epoca = epoca
-                sin_mejora = 0
-            else:
-                sin_mejora += 1
-            if sin_mejora >= 300:
-                break
-        cabeza.load_state_dict(mejor_estado)
-        with torch.no_grad():
-            error_verificacion = cabeza(x_verificacion) - y_verificacion
-            rmse_salida = error_verificacion.square().mean(dim=0).sqrt()
-            rmse = error_verificacion.square().mean().sqrt().item()
-        resultados_sinteticos.append({
-            'semilla': semilla, 'mejor_epoca': mejor_epoca,
-            'RMSE_validacion': np.sqrt(mejor_validacion), 'RMSE_verificacion': rmse,
-            'RMSE_max_salida': rmse_salida.max().item(),
-        })
-        print(f'KAN sintética, semilla {semilla:04d}, RMSE de verificación = {rmse:.6f}')
-        if semilla == SEMILLAS[0]:
-            cabeza_sintetica = cabeza
-    tabla_sintetica = pd.DataFrame(resultados_sinteticos)
-    print(tabla_sintetica.to_string(index=False))
-    print(tabla_sintetica[['RMSE_verificacion', 'RMSE_max_salida']].agg(['mean', 'std']).to_string())
-    assert np.isfinite(tabla_sintetica['RMSE_max_salida']).all()
-    assert tabla_sintetica['RMSE_max_salida'].le(0.01).all(), 'La KAN supera el RMSE sintético permitido.'
-    tabla_sintetica.to_csv('Tablas/06_KAN_sintetica.csv', index=False)
-    # Las tres semillas quedan por debajo de 0,01 en cada una de las cuatro salidas sintéticas
-
-    # Activaciones de la primera capa en el rango del ajuste sintético
+# Gráfico de sedimentación de la FPCA: proporción de varianza de cada componente y acumulada,
+# con la línea del 95 % y el M usado por la red
+def grafica_sedimentacion(explicada, m_elegido, archivo):
     import matplotlib.pyplot as plt
-    primera_capa = cabeza_sintetica.capas[0]
-    fig, axes = plt.subplots(1, 3, figsize=(13, 3.2))
-    for entrada, ax in enumerate(axes):
-        rejilla = torch.linspace(x_ajuste[:, entrada].min(), x_ajuste[:, entrada].max(), 200, dtype=torch.float64)
-        for salida in range(OCULTAS_KAN):
-            valores = primera_capa.arista(salida, entrada, rejilla)
-            ax.plot(rejilla.numpy(), (valores - valores.mean()).numpy(), label=f'Arista hacia h{salida + 1}')
-        ax.set_title(f'x{entrada + 1}')
-        ax.legend(fontsize=8)
-    plt.suptitle('Primera capa KAN · función sintética · semilla 0001')
-    plt.tight_layout()
-    fig.savefig('Figuras/06_KAN_activaciones_sinteticas.png', dpi=150)
-    plt.close(fig)
-    # En la semilla 0001, las aristas hacia h2 recuperan el seno de x1 y la curvatura de x2
+    k = len(explicada)
+    componentes = np.arange(1, k + 1)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.bar(componentes, 100 * explicada, color='#9ab8d8', label='Varianza de cada componente')
+    ax.plot(componentes, 100 * np.cumsum(explicada), 'o-', color='#1f4e79', label='Varianza acumulada')
+    ax.axhline(95, color='#c0392b', ls='--', lw=1.2, label='95 %')
+    ax.axvline(m_elegido, color='#555555', ls=':', lw=1.2, label=f'M = {m_elegido}')
+    for x, y in zip(componentes, 100 * np.cumsum(explicada)):
+        ax.annotate(f'{y:.1f} %', (x, y), textcoords='offset points', xytext=(0, -15), ha='center', fontsize=8)
+    ax.set(xlabel='Componente', ylabel='Varianza explicada (%)', ylim=(0, 110), xticks=componentes,
+           title='FPCA de las curvas de estaciones (entrenamiento)')
+    ax.legend(loc='center right', fontsize=8)
+    fig.tight_layout(); fig.savefig(archivo, dpi=150); plt.close(fig)
 
-    # Ajuste simbólico de la arista de x2 hacia la primera neurona oculta
-    rejilla = torch.linspace(x_ajuste[:, 1].min(), x_ajuste[:, 1].max(), 200, dtype=torch.float64)
-    coef_simbolicos, _, r2_simbolico = ajustar_simbolica(primera_capa, 0, 1, rejilla)
-    tabla_simbolica = pd.DataFrame([{
-        'semilla': SEMILLAS[0], 'entrada': 1, 'salida': 0,
-        'centro': primera_capa.centro[1].item(), 'escala': primera_capa.escala[1].item(),
-        'a0': coef_simbolicos[0].item(), 'a1': coef_simbolicos[1].item(),
-        'a2': coef_simbolicos[2].item(), 'a3': coef_simbolicos[3].item(),
-        'R2_verificacion': r2_simbolico,
-    }])
-    print('Expresión de la arista sintética: a0 + a1*u + a2*u² + a3*u³, u = (x-centro)/escala')
-    print(tabla_simbolica.to_string(index=False))
-    # El polinomio aproxima la arista sintética con R² cercano a 0,908 en los puntos intercalados
-    tabla_simbolica.to_csv('Tablas/06_KAN_simbolica_sintetica.csv', index=False)
 
-    # Integración del codificador y la KAN con entradas de entrenamiento
-    idx_entrenamiento = datos['particion'] == 'entrenamiento'
-    c_entrenamiento = torch.as_tensor(datos['c'][idx_entrenamiento], dtype=torch.float64)
-    cov_entrenamiento = torch.as_tensor(cov_norm[idx_entrenamiento], dtype=torch.float64)
-    comprobaciones = []
-    parametros_cabezas = []
-    for q in opciones_q:
-        for m in opciones_m:
-            for semilla in SEMILLAS:
-                establecer_semilla(semilla)
-                modelo = ModeloCodificadorCabezaKAN(W, R, q, m)
-                with torch.no_grad():
-                    h_entrenamiento = modelo.codificador(c_entrenamiento, cov_entrenamiento)
-                    modelo.cabeza.calibrar(h_entrenamiento)
-                c_lote, cov_lote = c_entrenamiento[:16], cov_entrenamiento[:16]
-                coordenadas = modelo(c_lote, cov_lote)
-                coordenadas.square().mean().backward()
-                gradientes = all(
-                    p.grad is not None and torch.isfinite(p.grad).all().item() and p.grad.abs().sum().item() > 0
-                    for p in modelo.parameters()
-                )
-                establecer_semilla(semilla)
-                replica = ModeloCodificadorCabezaKAN(W, R, q, m)
-                with torch.no_grad():
-                    replica.cabeza.calibrar(replica.codificador(c_entrenamiento, cov_entrenamiento))
-                    error_replica = (coordenadas - replica(c_lote, cov_lote)).abs().max().item()
-                comprobaciones.append({
-                    'q': q, 'M': m, 'semilla': semilla,
-                    'dimensiones_correctas': coordenadas.shape == (len(c_lote), m),
-                    'salida_finita': torch.isfinite(coordenadas).all().item(),
-                    'gradientes_finitos_no_nulos': gradientes, 'error_replica': error_replica,
-                })
-            n_kan = contar_parametros(modelo.cabeza)
-            ocultas_mlp = max(1, round((n_kan - m) / (q + m + 3)))
-            n_mlp = contar_parametros(CabezaMLP(q, m, ocultas_mlp))
-            parametros_cabezas.append({
-                'q': q, 'M': m, 'ocultas_KAN': OCULTAS_KAN, 'intervalos': INTERVALOS_KAN,
-                'grado': 3, 'parametros_KAN': n_kan, 'ocultas_MLP': ocultas_mlp,
-                'parametros_MLP': n_mlp, 'diferencia_pct': 100 * abs(n_mlp - n_kan) / n_kan,
-                'parametros_codificador': contar_parametros(modelo.codificador),
-            })
-    tabla_comprobaciones = pd.DataFrame(comprobaciones)
-    print(tabla_comprobaciones.to_string(index=False))
-    assert tabla_comprobaciones[['dimensiones_correctas', 'salida_finita', 'gradientes_finitos_no_nulos']].all().all()
-    assert tabla_comprobaciones['error_replica'].eq(0).all()
-    # El gradiente alcanza el codificador y las dos capas KAN con inicializaciones reproducibles
-    tabla_comprobaciones.to_csv('Tablas/06_KAN_comprobaciones.csv', index=False)
-    tabla_parametros = pd.DataFrame(parametros_cabezas)
-    print(tabla_parametros.to_string(index=False))
-    assert tabla_parametros['diferencia_pct'].le(10).all()
-    tabla_parametros.to_csv('Tablas/06_KAN_parametros.csv', index=False)
-    print('La KAN devuelve M coordenadas latentes. Entrenamiento con lluvia pendiente del FPCA y la pérdida funcional.')
+# Ejecución: entrenamiento de las tres cabezas y selección con validación
+def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, componentes=COMPONENTES_RED,
+                       lambdas=LAMBDAS_RUGOSIDAD, semillas=SEMILLAS, epocas=EPOCAS_MAXIMAS, prefijo='08_red'):
+    if escala not in TRANSFORMACIONES: raise ValueError(f'Escalas permitidas: {tuple(TRANSFORMACIONES)}')
+    datos = cargar_datos_red(carpeta, escala)
+    gram_s, rugosidad_s = matrices_integracion(datos['t'], datos['phi_sat'])
+    gram_e, _ = matrices_integracion(datos['t'], datos['phi_est'])
+    normalizador = NormalizadorCovariables().ajustar(datos['cov'], datos['particion'])
+    cov_norm = normalizador.transformar(datos['cov'])
+    cabezas = ('lineal', 'MLP', 'KAN')
+    Path('Tablas').mkdir(exist_ok=True)
+
+    # Parámetros de KAN y MLP para cada q y M (sum(p.numel()) de los parámetros entrenables)
+    parametros = []
+    for q in neuronas:
+        for m in componentes:
+            n_kan, n_mlp = contar_parametros(CabezaKAN(q, m)), contar_parametros(CabezaMLP(q, m, neuronas_ocultas_mlp(q, m)))
+            parametros.append({'q': q, 'M': m, 'parametros_lineal': contar_parametros(CabezaLineal(q, m)),
+                               'parametros_KAN': n_kan, 'ocultas_MLP': neuronas_ocultas_mlp(q, m), 'parametros_MLP': n_mlp,
+                               'diferencia_pct': 100 * abs(n_mlp - n_kan) / n_kan})
+    tabla_parametros = pd.DataFrame(parametros)
+    assert tabla_parametros['diferencia_pct'].le(10).all(), 'KAN y MLP difieren en más de 10 % de parámetros.'
+    tabla_parametros.to_csv(f'Tablas/{prefijo}_parametros_cabezas.csv', index=False)
+
+    # Varianza explicada acumulada de la FPCA para M = 1, ..., K (justificación de M)
+    k_est = datos['phi_est'].shape[1]
+    explicada = preparar_fpca(datos, k_est)[0]['explicada']
+    pd.DataFrame({'M': range(1, k_est + 1), 'varianza_explicada_acumulada': np.cumsum(explicada[:k_est])}) \
+        .to_csv(f'Tablas/{prefijo}_fpca_varianza.csv', index=False)
+    Path('Figuras').mkdir(exist_ok=True)
+    grafica_sedimentacion(explicada[:k_est], max(componentes), f'Figuras/{prefijo}_fpca_sedimentacion.png')
+    fpcas = {m: preparar_fpca(datos, m) for m in componentes}
+
+    # Búsqueda de hiperparámetros: las mismas q, M, lambda y semillas para las tres cabezas
+    busqueda, modelos = [], {}
+    for cabeza in cabezas:
+        for q in neuronas:
+            for m in componentes:
+                fpca, mu_c, psi_c, _ = fpcas[m]
+                for lam in lambdas:
+                    for semilla in semillas:
+                        modelo, perdida, resumen, _ = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s,
+                                                                   gram_e, fpca, mu_c, psi_c, cov_norm, epocas)
+                        modelos[(cabeza, q, m, lam, semilla)] = (modelo, perdida)
+                        busqueda.append({'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam, 'semilla': semilla, **resumen})
+                        print(f'{cabeza} q={q} M={m} lambda={lam} semilla={semilla:04d}: '
+                              f'validación={resumen["perdida_validacion"]:.4f} (época {resumen["mejor_epoca"]})', flush=True)
+    tabla_busqueda = pd.DataFrame(busqueda)
+    tabla_busqueda.to_csv(f'Tablas/{prefijo}_busqueda_hiperparametros.csv', index=False)
+    resumen = (tabla_busqueda.groupby(['cabeza', 'q', 'M', 'lambda'])['perdida_validacion']
+               .agg(['mean', 'std']).reset_index())
+    # q y M comunes a las tres cabezas (mismo codificador y mismo decodificador): para cada (q, M) se toma
+    # el mejor lambda de cada cabeza y se promedia la pérdida de validación de las tres cabezas
+    # lambda se elige por cabeza porque es parte de la pérdida, no de la arquitectura
+    mejor_lambda = resumen.loc[resumen.groupby(['cabeza', 'q', 'M'])['mean'].idxmin()]
+    q_comun, m_comun = mejor_lambda.groupby(['q', 'M'])['mean'].mean().idxmin()
+    elegidas = mejor_lambda[(mejor_lambda.q == q_comun) & (mejor_lambda.M == m_comun)].set_index('cabeza')
+    elegidas.to_csv(f'Tablas/{prefijo}_configuracion_elegida.csv')
+    print(elegidas.to_string())
+
+    # Equivalencia de la cabeza lineal elegida con la regresión función a función (cada semilla)
+    q, m, lam = int(elegidas.loc['lineal', 'q']), int(elegidas.loc['lineal', 'M']), elegidas.loc['lineal', 'lambda']
+    idx_va = np.flatnonzero(datos['particion'] == 'validacion')
+    equivalencia = []
+    for semilla in semillas:
+        modelo = modelos[('lineal', q, m, lam, semilla)][0]
+        error_integral, _ = verificar_regresion_funcional(modelo, datos, fpcas[m][0], cov_norm, idx_va)
+        error_coeficientes = verificar_equivalencia_lineal(modelo, datos['c_sat'][idx_va], cov_norm[idx_va],
+                                                           fpcas[m][0]['media'], fpcas[m][0]['base'].T)
+        equivalencia.append({'semilla': semilla, 'diferencia_max_integral': error_integral,
+                             'diferencia_max_coeficientes': error_coeficientes})
+    tabla_equivalencia = pd.DataFrame(equivalencia)
+    assert tabla_equivalencia[['diferencia_max_integral', 'diferencia_max_coeficientes']].le(1e-4).all().all()
+    tabla_equivalencia.to_csv(f'Tablas/{prefijo}_equivalencia_lineal.csv', index=False)
+    print(tabla_equivalencia.to_string(index=False))
+
+    # Valores recortados en 0 al volver a mm (validación, configuración elegida de cada cabeza)
+    va = datos['particion'] == 'validacion'
+    recortes = []
+    for cabeza in cabezas:
+        q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), elegidas.loc[cabeza, 'lambda']
+        for semilla in semillas:
+            modelo, perdida = modelos[(cabeza, q, m, lam, semilla)]
+            with torch.no_grad():
+                c_hat = perdida.coeficientes(modelo(torch.as_tensor(datos['c_sat'][va]), torch.as_tensor(cov_norm[va]))).numpy()
+            _, recortados = reconstruir_mm(c_hat, datos['phi_est'], escala)
+            recortes.append({'cabeza': cabeza, 'semilla': semilla, 'valores_recortados_pct': recortados})
+    pd.DataFrame(recortes).to_csv(f'Tablas/{prefijo}_valores_recortados.csv', index=False)
+
+    # Pesos de los modelos elegidos (3 cabezas x semillas) con la FPCA y el normalizador de covariables
+    carpeta_modelos = Path('Resultados_Modelos1'); carpeta_modelos.mkdir(exist_ok=True)
+    for cabeza in cabezas:
+        q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), float(elegidas.loc[cabeza, 'lambda'])
+        fpca, mu_c, psi_c, _ = fpcas[m]
+        for semilla in semillas:
+            modelo = modelos[(cabeza, q, m, lam, semilla)][0]
+            torch.save({'estado': modelo.state_dict(), 'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam,
+                        'semilla': semilla, 'escala': escala, 'media_fpca': fpca['media'], 'base_fpca': fpca['base'],
+                        'media_coeficientes': mu_c, 'base_coeficientes': psi_c,
+                        'media_covariables': normalizador.media, 'desviacion_covariables': normalizador.desviacion},
+                       carpeta_modelos / f'red_{cabeza}_semilla{semilla:04d}.pt')
+    return {'datos': datos, 'modelos': modelos, 'elegidas': elegidas}

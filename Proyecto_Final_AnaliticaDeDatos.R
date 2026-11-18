@@ -20,8 +20,7 @@ library(tidyverse)
 set.seed(2026)
 ##### Directorio de trabajo #####
 rm(list = ls())
-# El directorio de trabajo es la carpeta del repositorio (rutas relativas)
-# setwd("ruta/del/repositorio")
+
 
 # Carpetas de salida: tablas y figuras del informe, curvas para Python
 dir.create("Tablas", showWarnings = FALSE)
@@ -1720,26 +1719,40 @@ guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.
 
 
 ##### Regresion funcional #####
-# Modelo funcion-funcion: Y_est(t) = b0(t) + integral de b1(s, t) X_sat(s) ds
-# Se ajusta con entrenamiento (1981-1995); lambda se elige con validacion (1996-2000)
+# Dos modelos ajustados con entrenamiento (1981-1995); lambda se elige con validacion (1996-2000)
+# Funcion a funcion: Y(t) = b0(t) + integral de b1(s, t) X(s) ds
+# Concurrente con covariables: Y(t) = b0(t) + b1(t) X(t) + b2(t) altitud + b3(t) ONI
+# Los dos usan la escala de la red: raiz de la curva suavizada en mm (recortada en 0)
 particion_completa <- ifelse(metadatos_completos$YEAR <= 1995, "entrenamiento",
                              ifelse(metadatos_completos$YEAR <= 2000, "validacion", "prueba"))
 idx_entrenamiento <- which(particion_completa == "entrenamiento")
 idx_validacion <- which(particion_completa == "validacion")
 idx_prueba <- which(particion_completa == "prueba")
 
-satelite_fd <- fd(t(construccion_completa$satelital$coeficientes), base_satelite)
-estaciones_fd <- fd(t(construccion_completa$terrestre$coeficientes), base_estaciones)
+# Raiz de la curva MCP en mm, escrita de nuevo en la misma base por minimos cuadrados
+malla_regresion <- seq(0, 72, by = 0.1)
+raiz_suavizada <- function(coeficientes, base) {
+  valores <- sqrt(pmax(eval.fd(malla_regresion, fd(t(coeficientes), base)), 0))
+  smooth.basis(malla_regresion, valores, base)
+}
+raiz_estaciones <- raiz_suavizada(construccion_completa$terrestre$coeficientes, base_estaciones)
+satelite_fd <- raiz_suavizada(construccion_completa$satelital$coeficientes, base_satelite)$fd
+estaciones_fd <- raiz_estaciones$fd
+a_mm <- function(y) pmax(y, 0)^2
 
-# Bases de beta_0(t) y beta_1(s, t): la base de estaciones en t y la de satelite en s
+# Covariables estandarizadas con la media y la desviacion de entrenamiento
+oni_curvas <- oni_anual$oni_promedio[match(metadatos_completos$YEAR, oni_anual$YEAR)]
+estandarizar <- function(x) (x - mean(x[idx_entrenamiento])) / sd(x[idx_entrenamiento])
+altitud_std <- estandarizar(metadatos_completos$altitud_completa)
+oni_std <- estandarizar(oni_curvas)
+
+# Modelo 1: funcion a funcion con linmod (bases de estaciones en t y de satelite en s)
 beta0Par <- fdPar(base_estaciones, int2Lfd(2), 0)
-
 Ajuste_linmod <- function(lam) {
   beta1bifd <- bifd(matrix(0, K_satelite, K_estaciones), base_satelite, base_estaciones)
   beta1Par <- bifdPar(beta1bifd, int2Lfd(2), int2Lfd(2), lam, lam)
   linmod(satelite_fd[idx_entrenamiento], estaciones_fd[idx_entrenamiento], list(beta0Par, beta1Par))
 }
-
 # Prediccion en las 72 pentadas; la integral sobre s se aproxima en el punto medio de cada pentada
 puntos_medios <- seq(0.5, 71.5, 1)
 predecir_linmod <- function(ajuste, idx) {
@@ -1749,56 +1762,126 @@ predecir_linmod <- function(ajuste, idx) {
   as.vector(b0) + t(B1) %*% X
 }
 
-# Eleccion de lambda (comun en s y t) con el error en validacion
-loglam_regresion <- seq(-2, 8, 1)
-ECM_validacion <- c()
-Y_validacion <- eval.fd(tiempos, estaciones_fd[idx_validacion])
-for (l in seq_along(loglam_regresion)) {
-  ajuste <- Ajuste_linmod(10^loglam_regresion[l])
-  ECM_validacion[l] <- mean((Y_validacion - predecir_linmod(ajuste, idx_validacion))^2)
+# Modelo 2: concurrente con fRegress; las covariables escalares entran como vectores en xfdlist
+Ajuste_concurrente <- function(lam, y2cMap = NULL, SigmaE = NULL) {
+  xfdlist <- list(const = rep(1, length(idx_entrenamiento)), satelite = satelite_fd[idx_entrenamiento],
+                  altitud = altitud_std[idx_entrenamiento], oni = oni_std[idx_entrenamiento])
+  betaPar <- fdPar(base_estaciones, int2Lfd(2), lam)
+  betalist <- list(const = betaPar, satelite = betaPar, altitud = betaPar, oni = betaPar)
+  fRegress(estaciones_fd[idx_entrenamiento], xfdlist, betalist, y2cMap = y2cMap, SigmaE = SigmaE)
 }
-seleccion_regresion <- data.frame(log10_lambda = loglam_regresion, ECM_validacion, RMSE_validacion = sqrt(ECM_validacion))
+predecir_concurrente <- function(ajuste, idx) {
+  b <- sapply(ajuste$betaestlist, function(beta) eval.fd(tiempos, beta$fd))
+  b[, 1] + b[, 2] * eval.fd(tiempos, satelite_fd[idx]) +
+    outer(b[, 3], altitud_std[idx]) + outer(b[, 4], oni_std[idx])
+}
+
+# Eleccion de lambda con el error en validacion (escala raiz)
+loglam_regresion <- seq(-2, 8, 1)
+Y_validacion <- eval.fd(tiempos, estaciones_fd[idx_validacion])
+ECM_linmod <- c(); ECM_concurrente <- c()
+for (l in seq_along(loglam_regresion)) {
+  ECM_linmod[l] <- mean((Y_validacion - predecir_linmod(Ajuste_linmod(10^loglam_regresion[l]), idx_validacion))^2)
+  ECM_concurrente[l] <- mean((Y_validacion - predecir_concurrente(Ajuste_concurrente(10^loglam_regresion[l]),
+                                                                    idx_validacion))^2)
+}
+seleccion_regresion <- data.frame(log10_lambda = loglam_regresion, ECM_funcion_a_funcion = ECM_linmod,
+                                  ECM_concurrente = ECM_concurrente)
 seleccion_regresion
 guardar_tabla(seleccion_regresion, "06_regresion_seleccion_lambda.csv")
-loglam_regresion_opt <- loglam_regresion[which.min(ECM_validacion)]
+lam_linmod <- 10^loglam_regresion[which.min(ECM_linmod)]
+lam_concurrente <- 10^loglam_regresion[which.min(ECM_concurrente)]
 
-plot(loglam_regresion, sqrt(ECM_validacion), type = "b", pch = 19, xlab = expression(log[10](lambda)),
-     ylab = "RMSE en validacion (mm)", main = "Eleccion de lambda")
-abline(v = loglam_regresion_opt, lty = 3, col = "red")
+plot(loglam_regresion, ECM_linmod, type = "b", pch = 19, ylim = range(ECM_linmod, ECM_concurrente),
+     xlab = expression(log[10](lambda)), ylab = "ECM en validacion (escala raiz)", main = "Eleccion de lambda")
+lines(loglam_regresion, ECM_concurrente, type = "b", pch = 17, col = "red")
+legend("topright", c("Funcion a funcion", "Concurrente con covariables"), col = c("black", "red"),
+       pch = c(19, 17), bty = "n")
 guardar_figura("06_regresion_seleccion_lambda.png", 7, 5)
 
-ajuste_regresion <- Ajuste_linmod(10^loglam_regresion_opt)
+ajuste_linmod <- Ajuste_linmod(lam_linmod)
+ajuste_concurrente <- Ajuste_concurrente(lam_concurrente)
 
-# R2(t) en entrenamiento
+# Errores estandar puntuales del concurrente con la covarianza de los residuos (como en clase)
+Y_entrenamiento_malla <- eval.fd(malla_regresion, estaciones_fd[idx_entrenamiento])
+residuos_malla <- Y_entrenamiento_malla - eval.fd(malla_regresion, ajuste_concurrente$yhatfdobj)
+SigmaE_concurrente <- var(t(residuos_malla))
+error_estandar_concurrente <- Ajuste_concurrente(lam_concurrente, y2cMap = raiz_estaciones$y2cMap,
+                                                 SigmaE = SigmaE_concurrente)
+
+# R2(t) en entrenamiento de cada modelo
 Y_entrenamiento <- eval.fd(tiempos, estaciones_fd[idx_entrenamiento])
-Yhat_entrenamiento <- predecir_linmod(ajuste_regresion, idx_entrenamiento)
-R2_t <- 1 - rowSums((Y_entrenamiento - Yhat_entrenamiento)^2) /
-  rowSums((Y_entrenamiento - rowMeans(Y_entrenamiento))^2)
-mean(R2_t)
+R2_funcional <- function(Y, Yhat) 1 - rowSums((Y - Yhat)^2) / rowSums((Y - rowMeans(Y))^2)
+R2_linmod <- R2_funcional(Y_entrenamiento, predecir_linmod(ajuste_linmod, idx_entrenamiento))
+R2_concurrente <- R2_funcional(Y_entrenamiento, predecir_concurrente(ajuste_concurrente, idx_entrenamiento))
 
-# Error de la regresion y del satelite sin corregir en validacion
-X_validacion <- eval.fd(tiempos, satelite_fd[idx_validacion])
-errores_regresion <- data.frame(
-  modelo = c("Regresion funcional", "Satelite sin corregir"),
-  RMSE_validacion_mm = c(sqrt(min(ECM_validacion)), sqrt(mean((Y_validacion - X_validacion)^2))),
-  R2_medio_entrenamiento = c(mean(R2_t), NA))
-errores_regresion
-guardar_tabla(errores_regresion, "06_regresion_errores.csv")
+# Comparacion en validacion, en mm: frente a la curva de la estacion y frente a las pentadas observadas
+Y_validacion_mm <- eval.fd(tiempos, fd(t(construccion_completa$terrestre$coeficientes[idx_validacion, ]), base_estaciones))
+observado_validacion <- t(Y_completa[idx_validacion, ])
+predicciones_validacion <- list(
+  "Funcion a funcion" = a_mm(predecir_linmod(ajuste_linmod, idx_validacion)),
+  "Concurrente con covariables" = a_mm(predecir_concurrente(ajuste_concurrente, idx_validacion)),
+  "Satelite sin corregir" = eval.fd(tiempos, fd(t(construccion_completa$satelital$coeficientes[idx_validacion, ]),
+                                                base_satelite)))
+comparacion_regresion <- data.frame(
+  modelo = names(predicciones_validacion),
+  log10_lambda = c(log10(lam_linmod), log10(lam_concurrente), NA),
+  RMSE_curva_mm = sapply(predicciones_validacion, function(p) sqrt(mean((p - Y_validacion_mm)^2))),
+  RMSE_observado_mm = sapply(predicciones_validacion, function(p) sqrt(mean((p - observado_validacion)^2, na.rm = TRUE))),
+  sesgo_acumulado_pct = sapply(predicciones_validacion, function(p) {
+    obs <- !is.na(observado_validacion)
+    100 * (sum(p[obs]) / sum(observado_validacion[obs]) - 1)
+  }),
+  R2_medio_entrenamiento = c(mean(R2_linmod), mean(R2_concurrente), NA))
+comparacion_regresion
+guardar_tabla(comparacion_regresion, "06_regresion_comparacion.csv")
 
+# Funcion a funcion: R2(t) y superficie beta_1(s, t)
 par(mfrow = c(1, 2))
-plot(tiempos, R2_t, type = "l", lwd = 2, xlab = "Pentada", ylab = expression(R^2), ylim = c(0, 1),
+plot(tiempos, R2_linmod, type = "l", lwd = 2, xlab = "Pentada", ylab = expression(R^2), ylim = c(0, 1),
      main = expression(R^2 * "(t) en entrenamiento"))
-B1_regresion <- eval.bifd(puntos_medios, tiempos, ajuste_regresion$beta1estbifd)
+B1_regresion <- eval.bifd(puntos_medios, tiempos, ajuste_linmod$beta1estbifd)
 contour(puntos_medios, tiempos, B1_regresion, xlab = "s: pentada del satelite", ylab = "t: pentada de la estacion",
         main = expression(hat(beta)[1](s, t)), nlevels = 12)
 abline(0, 1, lty = 2, col = "red")
-guardar_figura("06_regresion_beta_y_R2.png", 11, 5)
-par(mfrow = c(1, 1))
+guardar_figura("06_regresion_funcion_a_funcion.png", 11, 5)
 
-# Predicciones de validacion y prueba
-prediccion_regresion <- data.frame(curva = rownames(construccion_completa$terrestre$coeficientes)[c(idx_validacion, idx_prueba)],
-                                   t(predecir_linmod(ajuste_regresion, c(idx_validacion, idx_prueba))))
-names(prediccion_regresion)[-1] <- paste0("P", sprintf("%02d", tiempos))
+# Concurrente: cada beta_j(t) con bandas de +- 2 errores estandar y R2(t) de los dos modelos
+nombres_beta <- c("Intercepto: beta_0(t)", "Satelite: beta_1(t)", "Altitud: beta_2(t)", "ONI: beta_3(t)")
+par(mfrow = c(2, 3))
+for (j in 1:4) {
+  bj <- eval.fd(malla_regresion, ajuste_concurrente$betaestlist[[j]]$fd)
+  sej <- eval.fd(malla_regresion, error_estandar_concurrente$betastderrlist[[j]])
+  matplot(malla_regresion, cbind(bj, bj + 2 * sej, bj - 2 * sej), type = "l", lty = c(1, 2, 2), lwd = c(2, 1, 1),
+          col = c("black", "red", "red"), xlab = "Pentada", ylab = "", main = nombres_beta[j])
+  abline(h = 0, lty = 3)
+}
+plot(tiempos, R2_concurrente, type = "l", lwd = 2, ylim = c(0, 1), xlab = "Pentada", ylab = expression(R^2 * (t)),
+     main = "R2(t) en entrenamiento")
+lines(tiempos, R2_linmod, lwd = 2, lty = 2, col = "blue")
+legend("bottomright", c("Concurrente", "Funcion a funcion"), lty = c(1, 2), col = c("black", "blue"), bty = "n")
+# Correlacion de los residuos entre pentadas (Hooker, 2010)
+contour(malla_regresion[seq(1, 721, 10)], malla_regresion[seq(1, 721, 10)],
+        cor(t(residuos_malla[seq(1, 721, 10), ])), xlab = "Pentada (s)", ylab = "Pentada (t)",
+        main = "Correlacion de los residuos", nlevels = 10)
+guardar_figura("06_regresion_concurrente.png", 11, 6.5)
+
+# Error por pentada en validacion: los dos modelos y el satelite sin corregir
+par(mfrow = c(1, 1))
+RMSE_pentada <- sapply(predicciones_validacion, function(p) sqrt(rowMeans((p - observado_validacion)^2, na.rm = TRUE)))
+matplot(tiempos, RMSE_pentada, type = "l", lty = 1, lwd = 2, col = c("black", "red", "darkorange"),
+        xlab = "Pentada", ylab = "RMSE frente a lo observado (mm)", main = "Error por pentada en validacion")
+legend("topleft", colnames(RMSE_pentada), col = c("black", "red", "darkorange"), lty = 1, lwd = 2, bty = "n")
+guardar_figura("06_regresion_error_por_pentada.png", 9, 5)
+
+# Predicciones en mm de validacion y prueba de los dos modelos
+curvas_regresion <- rownames(construccion_completa$terrestre$coeficientes)[c(idx_validacion, idx_prueba)]
+prediccion_regresion <- rbind(
+  data.frame(modelo = "Funcion a funcion", curva = curvas_regresion,
+             t(a_mm(predecir_linmod(ajuste_linmod, c(idx_validacion, idx_prueba))))),
+  data.frame(modelo = "Concurrente con covariables", curva = curvas_regresion,
+             t(a_mm(predecir_concurrente(ajuste_concurrente, c(idx_validacion, idx_prueba))))))
+names(prediccion_regresion)[-(1:2)] <- paste0("P", sprintf("%02d", tiempos))
 write.csv(prediccion_regresion, "Curvas/regresion_funcional_predicciones.csv", row.names = FALSE)
 
 
