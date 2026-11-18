@@ -53,6 +53,8 @@ def cargar_datos(carpeta='Curvas'):
     esperada = np.where(anios <= 1995, 'entrenamiento', np.where(anios <= 2000, 'validacion', 'prueba'))
     if np.any((anios < 1981) | (anios > 2003)) or np.any(particion != esperada):
         raise ValueError('Particiones incorrectas: 1981-95 / 1996-2000 / 2001-03.')
+    if datos.groupby('STATION_ID').particion.nunique().max() > 1:
+        raise ValueError('Hay estaciones en más de un conjunto: la partición debe ser por estaciones.')
     c = datos[columnas].to_numpy(dtype=np.float64)
     cov = datos[['altitud_completa', 'oni_promedio']].to_numpy(dtype=np.float64)
     t = base.t.to_numpy(dtype=np.float64); phi = base[columnas].to_numpy(dtype=np.float64)

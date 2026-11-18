@@ -1,5 +1,6 @@
 "paso","registros","estaciones","pares_estacion_anio"
 "Datos 2001-2003",200260,194,569
-"Errores aislados",200259,194,569
-"Acumulados mensuales",200259,194,569
-"Cobertura minima",179098,186,491
+"Estaciones reservadas para prueba",32027,30,90
+"Errores aislados",32027,30,90
+"Acumulados mensuales",32027,30,90
+"Cobertura minima",28452,30,78

@@ -1,10 +1,9 @@
-####################################################
-# Proyecto 3
+#################### Proyecto 3 ####################
 # Por: Natalia Paredes, Mariana Cifuentes, John Franco
 # y Estefanía Hernández
 ####################################################
 
-##### Librerias #####
+#################### Librerias ####################
 #install.packages("fda")
 #install.packages("readxl")
 #install.packages("tidyverse")
@@ -18,7 +17,7 @@ library(geodata)
 library(tidyverse)
 
 set.seed(2026)
-##### Directorio de trabajo #####
+#################### Directorio de trabajo ####################
 rm(list = ls())
 
 
@@ -38,7 +37,7 @@ guardar_figura <- function(nombre, ancho = 10, alto = 6) {
   dev.off()
 }
 
-##### Carga de datos #####
+#################### Carga de datos ####################
 # Precipitacion diaria en tierra
 p_tierra_1980_1990 <- read.csv("data/P_1980_1990.csv")
 p_tierra_1991_2003 <- read.csv("data/P_1991_2003.csv")
@@ -115,7 +114,45 @@ departamentos_col <- gadm(country = "COL", level = 1, path = tempdir())
 valle <- departamentos_col[departamentos_col$NAME_1 == "Valle del Cauca", ]
 
 
-##### Preprocesamiento de las estaciones #####
+#################### Particion por estaciones ####################
+# Cada estacion pertenece a un solo conjunto
+estaciones_particion <- info_estaciones[info_estaciones$STATION_ID %in% c(p_tierra$STATION_ID, p_prueba$STATION_ID) &
+                                          !is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
+                                          !is.na(info_estaciones$altitud_completa),
+                                        c("STATION_ID", "altitud_completa")]
+estaciones_particion$tercil_altitud <- cut(estaciones_particion$altitud_completa,
+                                           quantile(estaciones_particion$altitud_completa, c(0, 1/3, 2/3, 1)),
+                                           labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
+con_prueba <- estaciones_particion$STATION_ID %in% p_prueba$STATION_ID
+con_validacion <- estaciones_particion$STATION_ID %in% p_tierra$STATION_ID[p_tierra$YEAR >= 1996]
+
+set.seed(2026)
+estaciones_particion$particion <- "entrenamiento"
+for (tercil in levels(estaciones_particion$tercil_altitud)) {
+  en_tercil <- estaciones_particion$tercil_altitud == tercil
+  n_reservadas <- round(0.15 * sum(en_tercil))
+  candidatas <- which(en_tercil & con_prueba)
+  estaciones_particion$particion[candidatas[sample.int(length(candidatas), n_reservadas)]] <- "prueba"
+  candidatas <- which(en_tercil & con_validacion & estaciones_particion$particion == "entrenamiento")
+  estaciones_particion$particion[candidatas[sample.int(length(candidatas), n_reservadas)]] <- "validacion"
+}
+table(estaciones_particion$tercil_altitud, estaciones_particion$particion)
+guardar_tabla(estaciones_particion[order(estaciones_particion$particion, estaciones_particion$STATION_ID), ],
+              "01_particion_estaciones.csv")
+
+# Datos de cada conjunto
+estaciones_validacion <- estaciones_particion$STATION_ID[estaciones_particion$particion == "validacion"]
+estaciones_prueba_reservadas <- estaciones_particion$STATION_ID[estaciones_particion$particion == "prueba"]
+estaciones_entrenamiento <- setdiff(unique(p_tierra$STATION_ID), c(estaciones_validacion, estaciones_prueba_reservadas))
+p_tierra <- p_tierra[(p_tierra$STATION_ID %in% estaciones_entrenamiento & p_tierra$YEAR <= 1995) |
+                       (p_tierra$STATION_ID %in% estaciones_validacion & p_tierra$YEAR >= 1996), ]
+p_prueba <- p_prueba[p_prueba$STATION_ID %in% estaciones_prueba_reservadas, ]
+
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_tierra, "Particion por estaciones"))
+trazabilidad_prueba <- rbind(trazabilidad_prueba, contar(p_prueba, "Estaciones reservadas para prueba"))
+
+
+#################### Preprocesamiento de las estaciones ####################
 # Valores imposibles y errores de digitacion
 # Valores negativos 
 sum(p_tierra$VALUE < 0, na.rm = TRUE)
@@ -131,8 +168,8 @@ mayores_300 <- mayores_300[order(-mayores_300$YEAR), ]
 mayores_300
 guardar_tabla(mayores_300, "01_preprocesamiento_mayores_300mm.csv")
 
-# Valores menores al percentil 99.9 (120 mm)
-hist(p_tierra$VALUE[p_tierra$VALUE < 120],
+# Valores menores al percentil 99.9 (130 mm)
+hist(p_tierra$VALUE[p_tierra$VALUE < 130],
      main = "Precipitación diaria", xlab = "Precipitación (mm)", ylab = "Frecuencia")
 guardar_figura("01_preprocesamiento_histograma_diaria.png", 7, 5)
 
@@ -284,12 +321,18 @@ print(todo_cero[order(-todo_cero$diferencia_regional), c("STATION_ID", "YEAR", "
                                                          "diferencia_regional")], n = 30)
 guardar_tabla(todo_cero[order(-todo_cero$diferencia_regional), ], "01_preprocesamiento_meses_todo_cero.csv")
 
-# Meses seleccionados pasan a NA
-meses_ceros <- data.frame(
-  STATION_ID = c(2623300101, 2611400103, 2612710106, 2622900301, 2610000105,
-                 2612000113, 2612000202, 2612700203, 2612720101, 2622600201),
-  YEAR = c(1987, 1987, 1987, 1992, 1986, 1997, 1990, 1990, 1992, 1994),
-  MONTH = c(11, 9, 7, 8, 12, 1, 2, 9, 10, 9))
+# Meses que pasan a NA
+# Pico al final del mes: el porcentaje de ceros supera en al menos 10 puntos a la mediana
+# de las demas estaciones el mismo mes y año
+# Mes completo en cero: supera en al menos 25 puntos a la mediana regional del mismo mes y a la
+# mediana historica de la estacion (las estaciones sin historico 1981-1995 se juzgan solo con la regional)
+ceros_pico <- diagnostico_ceros_M[which(diagnostico_ceros_M$diferencia_mismo_anio >= 10), ]
+ceros_completos <- todo_cero[which(todo_cero$diferencia_regional >= 25 &
+                                     (is.na(todo_cero$diferencia_historica) | todo_cero$diferencia_historica >= 25)), ]
+meses_ceros <- rbind(data.frame(ceros_pico[, c("STATION_ID", "YEAR", "MONTH")], tipo = "Pico al final del mes"),
+                     data.frame(ceros_completos[, c("STATION_ID", "YEAR", "MONTH")], tipo = "Mes completo en cero"))
+meses_ceros
+guardar_tabla(meses_ceros, "01_preprocesamiento_meses_ceros_falsos.csv")
 
 ceros_falsos <- which(!is.na(p_m_depurado$VALUE) &
                         paste(p_m_depurado$STATION_ID, p_m_depurado$YEAR, p_m_depurado$MONTH) %in%
@@ -451,7 +494,7 @@ Y_terrestre_total <- tapply(tierra_pentadal$lluvia, list(tierra_pentadal$pentada
 dim(Y_terrestre_total)
 
 
-##### Fases ENSO (ONI) #####
+#################### Fases ENSO (ONI) ####################
 
 tabla_oni <- read_excel("data/ONI_1981_2003.xlsx")
 names(tabla_oni)[-1] <- c("DEF", "EFM", "FMA", "MAM", "AMJ", "MJJ",
@@ -530,7 +573,7 @@ guardar_tabla(enso_anual, "02_ONI_fases_por_anio.csv")
 guardar_tabla(oni_anual, "02_ONI_resumen_anual.csv")
 
 
-##### Emparejamiento estacion-pixel #####
+#################### Emparejamiento estacion-pixel ####################
 # Satelite y pixel de cada estacion
 # Imagenes pentadales de 1981 a 2000
 archivos <- list.files("data/ImagenesSatelitePentadal", pattern = "ppt.*\\.tif$", full.names = TRUE)
@@ -746,7 +789,7 @@ c(minimo_satelite = min(X_matriz, na.rm = TRUE), maximo_satelite = max(X_matriz,
 table(table(estaciones$pixel))
 
 
-##### Construccion de datos funcionales #####
+#################### Construccion de datos funcionales ####################
 # Base B-spline y rango de la matriz
 K_evaluar <- c(6, 8, 10, 12, 15, 20, 25, 30)
 
@@ -1342,7 +1385,7 @@ legend("topleft", c("Observado", colnames(medias_val)), lty = c(2, rep(1, length
        pch = c(16, rep(NA, length(K_prueba))), col = c("black", seq_along(K_prueba) + 1), bty = "n", cex = 0.75)
 
 
-##### Análisis exploratorio funcional #####
+#################### Análisis exploratorio funcional ####################
 # Curvas de 1981 a 2003
 metadatos_eda <- metadatos_completos
 fuentes_eda <- list(terrestre = Y_completa, satelital = X_completa)
@@ -1467,7 +1510,7 @@ legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange
        lty = c(1, 2), lwd = 2, bty = "n")
 # La desviación estándar muestra la misma dispersión en mm y aumenta hacia noviembre (en ambas fuentes)
 # Ese aumento coincide con el segundo pico de la media y señala mayor diferencia entre curvas en esa temporada
-# El máximo del satélite es 16,01 mm en la péntada 62; el de estaciones es 26,03 mm en la primera péntada
+# El máximo del satélite es 16,05 mm en la péntada 62; el de estaciones es 28,06 mm en la primera péntada
 # Entonces, dos picos de lluvia media no implican que la mayor dispersión ocurra siempre en esos dos picos
 guardar_figura("05_exploratorio_varianza_desviacion.png", 12, 5)
 par(par_dispersion_eda)
@@ -1533,8 +1576,8 @@ for (fuente in names(covarianza_eda)) {
 }
 covariacion_temporadas_eda
 guardar_tabla(covariacion_temporadas_eda, "05_exploratorio_covariacion_abril_noviembre.csv")
-# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 321,60 mm² en estaciones
-# y 160,02 mm² en satélite; las correlaciones son 0,79 y 0,84, respectivamente
+# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 344,57 mm² en estaciones
+# y 159,79 mm² en satélite; las correlaciones son 0,80 y 0,83, respectivamente
 # Los pares estación-año con lluvia por encima de la media en abril tienden a estar también por encima
 # de la media de noviembre; la covarianza mayor de estaciones incluye su mayor dispersión
 # La correlación se calculó reuniendo estaciones y años; no muestra si la relación se mantiene
@@ -1574,8 +1617,8 @@ for (fuente in names(curvas_eda_fd)) {
 tramos_derivada_eda
 guardar_tabla(tramos_derivada_eda, "05_exploratorio_tramos_derivada.csv")
 
-# En los tramos de descenso de mitad de año, la media baja de 29,57 a 12,12 mm en estaciones
-# y de 37,33 a 12,15 mm en satélite
+# En los tramos de descenso de mitad de año, la media baja de 29,23 a 12,38 mm en estaciones
+# y de 37,42 a 12,12 mm en satélite
 # El valle conserva lluvia; corresponde al periodo menos lluvioso entre las dos temporadas del ciclo bimodal
 
 # Inicio y fin según los cruces con la lluvia media del año
@@ -1612,7 +1655,7 @@ cruces_lluvia_eda
 temporadas_lluvia_eda
 guardar_tabla(cruces_lluvia_eda, "05_exploratorio_cruces_umbral_lluvia.csv")
 guardar_tabla(temporadas_lluvia_eda, "05_exploratorio_temporadas_lluvia.csv")
-# Con umbrales de 23,36 mm en estaciones y 25,07 mm en satélite, los dos tramos completos abarcan
+# Con umbrales de 23,52 mm en estaciones y 25,17 mm en satélite, los dos tramos completos abarcan
 # aproximadamente marzo-junio y septiembre-diciembre, con los picos de abril-mayo y noviembre dentro de ellos
 # Son periodos por encima del promedio de cada fuente; sus límites dependen del umbral y del suavizado
 # El cruce ascendente del satélite cerca de la péntada 71 queda sin cierre dentro del año
@@ -1628,8 +1671,8 @@ legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange
        lty = c(1, 2), lwd = 2, bty = "n")
 guardar_figura("05_exploratorio_derivada_media.png", 8, 5)
 # Por encima de cero, la lluvia media aumenta; por debajo, disminuye
-# En estaciones, la subida de comienzos de año empieza entre la cuarta y la quinta péntada
-# Después del primer pico, la lluvia baja hasta cerca de la péntada 44 en estaciones y de la 41 en satélite
+# En estaciones, la subida de comienzos de año empieza entre la quinta y la sexta péntada
+# Después del primer pico, la lluvia baja hasta cerca de la péntada 44 en estaciones y de la 40 en satélite
 # Las dos fuentes vuelven a subir hacia el pico de noviembre y después bajan
 # Los dos tramos principales de aumento describen la entrada hacia los máximos del ciclo bimodal
 # La pendiente negativa después de cada máximo indica que disminuye la cantidad de lluvia por péntada,
@@ -1699,8 +1742,8 @@ resumen_atipicas_eda <- profundidades_eda %>%
   summarize(curvas = n(), atipicas = sum(atipica), porcentaje = 100 * mean(atipica), .groups = "drop")
 resumen_atipicas_eda
 guardar_tabla(resumen_atipicas_eda, "05_exploratorio_resumen_atipicas.csv")
-# El boxplot señala 56 pares estación-año en estaciones y 26 en satélite
-# Representan el 1,95 % y el 0,91 % de las curvas de cada fuente, respectivamente
+# El boxplot señala 23 pares estación-año en estaciones y 10 en satélite
+# Representan el 1,56 % y el 0,68 % de las curvas de cada fuente, respectivamente
 
 atipicas_por_estacion_eda <- profundidades_eda %>%
   group_by(fuente, STATION_ID) %>%
@@ -1711,18 +1754,155 @@ atipicas_por_estacion_eda <- profundidades_eda %>%
   arrange(fuente, desc(atipicas))
 atipicas_por_estacion_eda
 guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.csv")
-# En tierra, la estación 5301500106, a 232 m, aparece señalada en sus 15 años disponibles
+# En tierra, la estación 5301500106, a 232 m, aparece señalada en sus 3 años disponibles
 # La estación 5301000104, a 20 m, aparece en sus 10 años en tierra y en 9 de los 10 en satélite
 # La repetición muestra que el boxplot detecta diferencias que persisten de algunos sitios frente a la red,
 # además de posibles años excepcionales; la marca no significa necesariamente un año anómalo para ese sitio
 # Hay casos terrestres a 20 m y a 2100 m, y estaciones sin altitud registrada
 
 
-##### Regresion funcional #####
-# Dos modelos ajustados con entrenamiento (1981-1995); lambda se elige con validacion (1996-2000)
-# Funcion a funcion: Y(t) = b0(t) + integral de b1(s, t) X(s) ds
-# Concurrente con covariables: Y(t) = b0(t) + b1(t) X(t) + b2(t) altitud + b3(t) ONI
-# Los dos usan la escala de la red: raiz de la curva suavizada en mm (recortada en 0)
+#################### Comparación funcional por fuente ####################
+# Mismos pares estación-año y misma malla que el análisis exploratorio (1981-2003)
+# El emparejamiento estación-píxel está en la sección de emparejamiento (tablas 03_emparejamiento_*)
+estaciones_comp <- eval.fd(pentadas_eda, curvas_eda_fd$terrestre)
+satelite_comp <- eval.fd(pentadas_eda, curvas_eda_fd$satelital)
+n_comp <- ncol(estaciones_comp)
+
+# Curva de diferencia d(t) = estación - satélite, media y error estándar puntual
+diferencia_comp <- estaciones_comp - satelite_comp
+media_dif_comp <- rowMeans(diferencia_comp)
+ee_dif_comp <- apply(diferencia_comp, 1, sd) / sqrt(n_comp)
+tabla_dif_comp <- data.frame(pentada = pentadas_eda, media = media_dif_comp, EE = ee_dif_comp,
+                             inferior = media_dif_comp - 2 * ee_dif_comp,
+                             superior = media_dif_comp + 2 * ee_dif_comp)
+tabla_dif_comp$estado <- ifelse(tabla_dif_comp$inferior > 0, "Satélite subestima",
+                                ifelse(tabla_dif_comp$superior < 0, "Satélite sobreestima", "Banda contiene el cero"))
+guardar_tabla(tabla_dif_comp, "07_comparacion_diferencia.csv")
+
+# Intervalos del año donde la banda no contiene el cero
+rachas_comp <- rle(tabla_dif_comp$estado)
+fin_comp <- cumsum(rachas_comp$lengths)
+inicio_comp <- fin_comp - rachas_comp$lengths + 1
+intervalos_comp <- data.frame(inicio_pentada = pentadas_eda[inicio_comp], fin_pentada = pentadas_eda[fin_comp],
+                              estado = rachas_comp$values)
+intervalos_comp <- intervalos_comp[intervalos_comp$estado != "Banda contiene el cero", ]
+intervalos_comp
+guardar_tabla(intervalos_comp, "07_comparacion_intervalos_sin_cero.csv")
+
+plot(pentadas_eda, media_dif_comp, type = "n", ylim = range(tabla_dif_comp$inferior, tabla_dif_comp$superior),
+     xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Curva de diferencia media con banda de ± 2 EE")
+polygon(c(pentadas_eda, rev(pentadas_eda)), c(tabla_dif_comp$inferior, rev(tabla_dif_comp$superior)),
+        col = "grey85", border = NA)
+lines(pentadas_eda, media_dif_comp, lwd = 2)
+abline(h = 0, lty = 2)
+for (i in seq_len(nrow(intervalos_comp))) {
+  rect(intervalos_comp$inicio_pentada[i], par("usr")[3], intervalos_comp$fin_pentada[i], par("usr")[3] + 0.6,
+       col = ifelse(intervalos_comp$estado[i] == "Satélite subestima", "steelblue", "darkorange"), border = NA)
+}
+legend("topleft", c("Media de d(t)", "Banda ± 2 EE", "Satélite subestima", "Satélite sobreestima"),
+       col = c("black", "grey85", "steelblue", "darkorange"), lwd = c(2, 8, 8, 8), bty = "n")
+guardar_figura("07_comparacion_diferencia.png", 9, 5)
+# El error estándar trata cada par estación-año como independiente; los años de una misma estación
+# están correlacionados, por lo que la banda es más angosta que una que considere esa dependencia
+
+# Correlación cruzada funcional: correlación entre la estación en s y el satélite en t
+centrada_est_comp <- estaciones_comp - rowMeans(estaciones_comp)
+centrada_sat_comp <- satelite_comp - rowMeans(satelite_comp)
+covarianza_cruzada_comp <- centrada_est_comp %*% t(centrada_sat_comp) / (n_comp - 1)
+correlacion_cruzada_comp <- covarianza_cruzada_comp /
+  outer(apply(estaciones_comp, 1, sd), apply(satelite_comp, 1, sd))
+# Comprobación con cor.fd() de fda
+correlacion_cruzada_R <- cor.fd(pentadas_eda, curvas_eda_fd$terrestre, pentadas_eda, curvas_eda_fd$satelital)
+max(abs(correlacion_cruzada_comp - correlacion_cruzada_R))
+diagonal_comp <- data.frame(pentada = pentadas_eda, correlacion = diag(correlacion_cruzada_comp))
+guardar_tabla(diagonal_comp, "07_comparacion_correlacion_diagonal.csv")
+
+par_cruzada_comp <- par(mfrow = c(1, 2))
+contour(pentadas_eda, pentadas_eda, correlacion_cruzada_comp, levels = seq(-1, 1, by = 0.1),
+        xlab = "Péntada s (estación)", ylab = "Péntada t (satélite)", main = "Correlación cruzada funcional")
+abline(0, 1, lty = 2, col = "grey50")
+plot(pentadas_eda, diagonal_comp$correlacion, type = "l", lwd = 2, ylim = c(0, 1),
+     xlab = "Péntada", ylab = "Correlación", main = "Diagonal: correlación en la misma péntada")
+guardar_figura("07_comparacion_correlacion_cruzada.png", 12, 5)
+par(par_cruzada_comp)
+
+# Varianza integrada de cada fuente (las covarianzas están en 05_exploratorio_covarianza.png)
+paso_comp <- diff(pentadas_eda)[1]
+varianza_integrada_comp <- c(estaciones = sum(apply(estaciones_comp, 1, var)) * paso_comp,
+                             satelite = sum(apply(satelite_comp, 1, var)) * paso_comp)
+varianza_integrada_comp
+
+# Diferencia media por tercil de altitud de la estación
+altitud_comp <- metadatos_eda$altitud_completa
+tercil_comp <- cut(altitud_comp, quantile(altitud_comp, c(0, 1/3, 2/3, 1), na.rm = TRUE),
+                   labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
+cortes_altitud_comp <- round(quantile(altitud_comp, c(1/3, 2/3), na.rm = TRUE))
+dif_altitud_comp <- data.frame(pentada = pentadas_eda)
+for (nivel in levels(tercil_comp)) {
+  dif_altitud_comp[[nivel]] <- rowMeans(diferencia_comp[, which(tercil_comp == nivel), drop = FALSE])
+}
+guardar_tabla(dif_altitud_comp, "07_comparacion_diferencia_altitud.csv")
+table(tercil_comp, useNA = "ifany")
+
+matplot(pentadas_eda, as.matrix(dif_altitud_comp[, -1]), type = "l", lty = 1, lwd = 2,
+        col = c("darkgreen", "goldenrod", "purple"), xlab = "Péntada", ylab = "Estación - satélite (mm)",
+        main = "Diferencia media por tercil de altitud")
+abline(h = 0, lty = 2)
+legend("topleft", paste0(levels(tercil_comp), c(paste0(" (< ", cortes_altitud_comp[1], " m)"),
+                                                 paste0(" (", cortes_altitud_comp[1], "-", cortes_altitud_comp[2], " m)"),
+                                                 paste0(" (> ", cortes_altitud_comp[2], " m)"))),
+       col = c("darkgreen", "goldenrod", "purple"), lwd = 2, bty = "n")
+guardar_figura("07_comparacion_diferencia_altitud.png", 9, 5)
+
+# Diferencia media por fase ENSO: cada péntada toma la fase del mes central de su ventana ONI
+mes_comp <- pmin(12, pmax(1, ceiling(pentadas_eda / 6)))
+fases_comp <- c("El Niño", "La Niña", "Neutral")
+fase_mes_comp <- oni_temporal[, c("YEAR", "mes_central", "fase_enso")]
+dif_enso_comp <- data.frame(pentada = pentadas_eda)
+conteos_enso_comp <- data.frame(pentada = pentadas_eda)
+for (fase in fases_comp) {
+  dif_enso_comp[[fase]] <- NA
+  conteos_enso_comp[[fase]] <- 0
+}
+for (j in seq_along(pentadas_eda)) {
+  fila_fase <- match(paste(metadatos_eda$YEAR, mes_comp[j]), paste(fase_mes_comp$YEAR, fase_mes_comp$mes_central))
+  fase_curva <- fase_mes_comp$fase_enso[fila_fase]
+  for (fase in fases_comp) {
+    en_fase <- which(fase_curva == fase)
+    conteos_enso_comp[j, fase] <- length(en_fase)
+    if (length(en_fase) > 0) dif_enso_comp[j, fase] <- mean(diferencia_comp[j, en_fase])
+  }
+}
+guardar_tabla(dif_enso_comp, "07_comparacion_diferencia_enso.csv")
+guardar_tabla(conteos_enso_comp, "07_comparacion_conteos_enso.csv")
+
+matplot(pentadas_eda, as.matrix(dif_enso_comp[, -1]), type = "l", lty = 1, lwd = 2,
+        col = c("firebrick", "steelblue", "grey40"), xlab = "Péntada", ylab = "Estación - satélite (mm)",
+        main = "Diferencia media por fase ENSO")
+abline(h = 0, lty = 2)
+legend("topleft", fases_comp, col = c("firebrick", "steelblue", "grey40"), lwd = 2, bty = "n")
+guardar_figura("07_comparacion_diferencia_enso.png", 9, 5)
+# El ONI es el mismo para todas las estaciones de un año: cada fase reúne pocos años distintos
+
+# Resumen de la comparación
+acumulado_est_comp <- colSums(estaciones_comp) * paso_comp
+acumulado_sat_comp <- colSums(satelite_comp) * paso_comp
+resumen_comp <- data.frame(
+  pares_estacion_anio = n_comp,
+  estaciones = n_distinct(metadatos_eda$STATION_ID),
+  diferencia_media_mm = mean(diferencia_comp),
+  correlacion_diagonal_mediana = median(diagonal_comp$correlacion),
+  varianza_integrada_estaciones = varianza_integrada_comp[["estaciones"]],
+  varianza_integrada_satelite = varianza_integrada_comp[["satelite"]],
+  sesgo_acumulado_satelite_mediano_pct = median(100 * (acumulado_sat_comp / acumulado_est_comp - 1)),
+  pentadas_satelite_subestima = sum(tabla_dif_comp$estado == "Satélite subestima") * paso_comp,
+  pentadas_satelite_sobreestima = sum(tabla_dif_comp$estado == "Satélite sobreestima") * paso_comp
+)
+resumen_comp
+guardar_tabla(resumen_comp, "07_comparacion_resumen.csv")
+
+
+#################### Regresion funcional ####################
 particion_completa <- ifelse(metadatos_completos$YEAR <= 1995, "entrenamiento",
                              ifelse(metadatos_completos$YEAR <= 2000, "validacion", "prueba"))
 idx_entrenamiento <- which(particion_completa == "entrenamiento")
@@ -1746,7 +1926,7 @@ estandarizar <- function(x) (x - mean(x[idx_entrenamiento])) / sd(x[idx_entrenam
 altitud_std <- estandarizar(metadatos_completos$altitud_completa)
 oni_std <- estandarizar(oni_curvas)
 
-# Modelo 1: funcion a funcion con linmod (bases de estaciones en t y de satelite en s)
+# Modelo 1: funcion a funcion 
 beta0Par <- fdPar(base_estaciones, int2Lfd(2), 0)
 Ajuste_linmod <- function(lam) {
   beta1bifd <- bifd(matrix(0, K_satelite, K_estaciones), base_satelite, base_estaciones)
@@ -1762,7 +1942,7 @@ predecir_linmod <- function(ajuste, idx) {
   as.vector(b0) + t(B1) %*% X
 }
 
-# Modelo 2: concurrente con fRegress; las covariables escalares entran como vectores en xfdlist
+# Modelo 2: concurrente con covariables
 Ajuste_concurrente <- function(lam, y2cMap = NULL, SigmaE = NULL) {
   xfdlist <- list(const = rep(1, length(idx_entrenamiento)), satelite = satelite_fd[idx_entrenamiento],
                   altitud = altitud_std[idx_entrenamiento], oni = oni_std[idx_entrenamiento])
@@ -1885,7 +2065,7 @@ names(prediccion_regresion)[-(1:2)] <- paste0("P", sprintf("%02d", tiempos))
 write.csv(prediccion_regresion, "Curvas/regresion_funcional_predicciones.csv", row.names = FALSE)
 
 
-##### Curvas para Python #####
+#################### Curvas para Python ####################
 # Curvas MCP de 1981 a 2003; cada fuente tiene su propia base
 nombres_estaciones <- paste0("c", sprintf("%02d", 1:K_estaciones))
 nombres_satelite <- paste0("c", sprintf("%02d", 1:K_satelite))
