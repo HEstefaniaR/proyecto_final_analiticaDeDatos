@@ -1,4 +1,4 @@
-"modelo","log10_lambda","RMSE_curva_mm","RMSE_observado_mm","sesgo_acumulado_pct","R2_medio_entrenamiento"
-"Funcion a funcion",8,15.909937144027,29.2791240290718,-21.32370194796,0.28750142131845
-"Concurrente con covariables",5,15.6171359235563,28.8429425238361,-4.28919083630221,0.251232903068326
-"Satelite sin corregir",NA,15.7237794174738,28.6827382595773,3.8134499587352,NA
+"modelo","log10_lambda","RMSE_mm","sesgo_acumulado_pct","R2_medio_entrenamiento"
+"Funcion a funcion",8,15.8750671890754,-20.1299815565717,0.28750142131845
+"Concurrente con covariables",5,15.566838828521,-2.81940583983611,0.251232903068326
+"Satelite sin corregir",NA,15.6385916111628,5.41008137072445,NA

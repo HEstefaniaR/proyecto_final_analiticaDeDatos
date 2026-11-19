@@ -39,16 +39,17 @@ def predicciones_validacion(D):
     return pred
 
 
-# Métricas de cada curva: L² relativo, KGE, acumulados, error en la fecha de los picos y error cuadrático en las péntadas
+# Métricas de cada curva frente a la curva suavizada de la estación: L2 relativo, KGE, acumulados,
+# error en la fecha de los picos y error cuadrático en las 72 péntadas
 def metricas_por_curva(D, curva_fina):
-    t, ref_f, obs = D['t_fina'], D['estacion_mm'], D['observado']
+    t, ref_f, obs = D['t_fina'], D['estacion_mm'], D['referencia']
     pent, ref = curva_fina[:, D['filas']], ref_f[:, D['filas']]
     m = ~np.isnan(obs)
     tabla = pd.DataFrame({'L2_relativo': np.sqrt(np.trapezoid((curva_fina - ref_f)**2, t, axis=1) / np.trapezoid(ref_f**2, t, axis=1))})
     r = np.array([np.corrcoef(a, b)[0, 1] for a, b in zip(pent, ref)])
     tabla['KGE'] = 1 - np.sqrt((r - 1)**2 + (pent.std(1) / ref.std(1) - 1)**2 + (pent.mean(1) / ref.mean(1) - 1)**2)
     tabla['acumulado_predicho'] = np.where(m, pent, 0).sum(1)
-    tabla['acumulado_observado'] = np.nansum(obs, 1)
+    tabla['acumulado_estacion'] = np.nansum(obs, 1)
     for j, (a, b) in enumerate(Aa.TEMPORADAS, 1):
         v = (t >= a) & (t <= b)
         tabla[f'pico{j}_pentadas'] = np.abs(t[v][curva_fina[:, v].argmax(1)] - t[v][ref_f[:, v].argmax(1)])
@@ -59,7 +60,7 @@ def metricas_por_curva(D, curva_fina):
 
 # Métricas de un conjunto de curvas (filas de 'tabla', con repeticiones si viene de un remuestreo)
 def agregar(tabla):
-    sesgo = 100 * (tabla.acumulado_predicho.sum() / tabla.acumulado_observado.sum() - 1)
+    sesgo = 100 * (tabla.acumulado_predicho.sum() / tabla.acumulado_estacion.sum() - 1)
     return {'L2_relativo': tabla.L2_relativo.mean(), 'KGE': tabla.KGE.median(), 'sesgo_%': sesgo, 'sesgo_abs_%': abs(sesgo),
             'pico1_pentadas': tabla.pico1_pentadas.mean(), 'pico2_pentadas': tabla.pico2_pentadas.mean(),
             'RECM_mm': np.sqrt(tabla.error_cuadratico.sum() / tabla.n_pentadas.sum())}
@@ -101,7 +102,7 @@ def bootstrap(D, por_curva, remuestreos=REMUESTREOS, semilla=SEMILLA_BOOTSTRAP):
 # Diferencia A - B de cada métrica con su IC del 95 % (percentiles 2,5 y 97,5 del bootstrap)
 # A supera a B solo si el intervalo excluye el cero en la dirección favorable a A
 def comparar(por_curva, remuestreos_bootstrap):
-    observado = {m: pd.DataFrame([agregar(t) for (mm, s), t in por_curva.items() if mm == m]).mean() for m in (*CABEZAS, SATELITE)}
+    estimado = {m: pd.DataFrame([agregar(t) for (mm, s), t in por_curva.items() if mm == m]).mean() for m in (*CABEZAS, SATELITE)}
     ancho = remuestreos_bootstrap.set_index(['remuestreo', 'modelo'])
     pares = [('MLP', 'lineal'), ('KAN', 'lineal'), ('KAN', 'MLP')] + [(c, SATELITE) for c in CABEZAS]
     filas = []
@@ -114,7 +115,7 @@ def comparar(por_curva, remuestreos_bootstrap):
                 conclusion = f'{a} supera a {b}' if a_mejor else f'{b} supera a {a}'
             else:
                 conclusion = 'Sin diferencia'
-            filas.append({'A': a, 'B': b, 'metrica': metrica, 'diferencia_A_menos_B': observado[a][metrica] - observado[b][metrica],
+            filas.append({'A': a, 'B': b, 'metrica': metrica, 'diferencia_A_menos_B': estimado[a][metrica] - estimado[b][metrica],
                           'IC95_inferior': inf, 'IC95_superior': sup, 'conclusion': conclusion})
     return pd.DataFrame(filas)
 
@@ -122,7 +123,7 @@ def comparar(por_curva, remuestreos_bootstrap):
 def grafica_intervalos(comparacion):
     metricas = list(METRICAS)
     fig, axes = plt.subplots(1, len(metricas), figsize=(4 * len(metricas), 3.6), sharey=True)
-    pares = comparacion[['A', 'B']].drop_duplicates().apply(lambda f: f'{f.A} − {f.B}', axis=1).tolist()
+    pares = comparacion[['A', 'B']].drop_duplicates().apply(lambda f: f'{f.A} - {f.B}', axis=1).tolist()
     for ax, metrica in zip(axes, metricas):
         sub = comparacion[comparacion.metrica == metrica].reset_index(drop=True)
         for i, f in sub.iterrows():
@@ -132,15 +133,15 @@ def grafica_intervalos(comparacion):
         ax.axvline(0, c='0.5', lw=0.8, ls='--')
         ax.set_title(metrica + (' (menor es mejor)' if METRICAS[metrica] else ' (mayor es mejor)'), fontsize=9)
     axes[0].set_yticks(range(len(pares))); axes[0].set_yticklabels(pares); axes[0].invert_yaxis()
-    fig.supxlabel('Diferencia A − B con IC bootstrap del 95 % (morado: el intervalo excluye el cero)')
+    fig.supxlabel('Diferencia A - B con IC bootstrap del 95 % (morado: el intervalo excluye el cero)')
     fig.tight_layout()
     return fig
 
 
 def grafica_media(D, pred):
-    t = np.arange(1, 73); m_obs = np.nanmean(D['observado'], 0)
+    t = np.arange(1, 73); m_obs = D['referencia'].mean(0)
     fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-    axes[0].plot(t, m_obs, 'k', lw=2, label='Observado')
+    axes[0].plot(t, m_obs, 'k', lw=2, label='Estación')
     for modelo in (*CABEZAS, SATELITE):
         curvas = [c[:, D['filas']] for (m, s), c in pred.items() if m == modelo]
         media = np.mean(curvas, axis=0).mean(0)

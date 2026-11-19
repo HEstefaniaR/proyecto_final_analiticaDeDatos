@@ -1,9 +1,8 @@
 "paso","registros","estaciones","pares_estacion_anio"
 "Datos 1981-2003",1930611,323,5514
 "Sin el conjunto de prueba (1981-2000)",1730351,322,4945
-"Particion por estaciones",1107054,290,3177
-"Errores aislados",1107049,290,3177
-"Acumulados mensuales",1107020,290,3177
-"Ceros falsos",1106657,290,3177
-"Cobertura minima",967470,272,2653
-"Emparejamiento estacion-pixel",511456,143,1402
+"Errores aislados",1730346,322,4945
+"Acumulados mensuales",1730313,322,4945
+"Ceros falsos",1729679,322,4945
+"Cobertura minima",1534738,306,4208
+"Emparejamiento estacion-pixel",920772,172,2524

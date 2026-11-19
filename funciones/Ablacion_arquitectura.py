@@ -51,11 +51,15 @@ def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
     D['W_e'], _ = Mo.matrices_integracion(t_fina, D['phi_e_f'])
 
     leer = lambda f: pd.read_csv(carpeta_curvas / f, dtype={'curva': str}).set_index('curva').loc[meta.curva].to_numpy(float)
-    D['observado'] = leer('observado_estaciones.csv')[va]
-    D['satelite_obs'] = leer('observado_satelite.csv')[va]
-    D['estacion_mm'] = leer('coeficientes_estaciones.csv')[va] @ D['phi_e_f'].T
-    D['satelite_mm'] = leer('coeficientes_satelite.csv')[va] @ D['phi_s_f'].T
-    D['climatologia'] = np.nanmean(leer('observado_estaciones.csv')[tr], axis=0)
+    # Referencia de todas las métricas: curva suavizada de la estación en mm, recortada en 0 como las predicciones
+    estaciones_mm = np.maximum(leer('coeficientes_estaciones.csv') @ D['phi_e_f'].T, 0)
+    D['estacion_mm'] = estaciones_mm[va]
+    D['satelite_mm'] = np.maximum(leer('coeficientes_satelite.csv')[va] @ D['phi_s_f'].T, 0)
+    D['referencia'] = D['estacion_mm'][:, filas]
+    D['satelite_pent'] = D['satelite_mm'][:, filas]
+    # Climatología: curva media de las estaciones de entrenamiento
+    D['climatologia_fina'] = estaciones_mm[tr].mean(0)
+    D['climatologia'] = D['climatologia_fina'][filas]
     D['curvas_va'] = meta.curva[va].to_numpy()
 
     # ONI: promedio anual, máximo del año, ventana DEF y curva de las 12 ventanas en [0, 72]
@@ -83,7 +87,7 @@ def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
     return D
 
 
-# Neuronas funcionales z = A W c, con penalización de rugosidad de las w_k(t)
+# Neuronas funcionales con penalización de rugosidad
 class Codificador(nn.Module):
     def __init__(self, gram, rugosidad, q):
         super().__init__()
@@ -144,7 +148,7 @@ def fpca_estaciones(D, m):
 def argumentos(D, idx, oni):
     return T(D['datos']['c_sat'][idx]), T(D['c_oni'][idx]), T(D['covariables'][oni][idx])
 
-# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L² de validación
+# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L2 de validación
 def entrenar(D, cabeza, q, m, semilla, oni='promedio anual', anchos=(2,), intervalos=12, q_oni=2):
     tr, va = D['tr'], D['va']
     c_obj = D['datos']['c_est']
@@ -176,10 +180,11 @@ def a_mm(D, c_hat):
     return np.maximum(c_hat @ D['phi_e'].T, 0)**2, np.maximum(c_hat @ D['phi_e_f'].T, 0)**2
 
 
-# Métricas en validación: RECM y sesgo frente a lo observado; L² relativo, KGE y fecha de los picos frente a la curva de la estación
+# Métricas en validación frente a la curva suavizada de la estación: RECM y sesgo del acumulado en las 72 péntadas;
+# L2 relativo, KGE y fecha de los picos en la malla fina
 def metricas(D, pred_pent, pred_fina=None):
-    obs = D['observado']; m = ~np.isnan(obs)
-    out = {'RECM_mm': np.sqrt(np.mean((pred_pent[m] - obs[m])**2)), 'sesgo_%': 100 * (pred_pent[m].sum() / obs[m].sum() - 1)}
+    ref_p = D['referencia']
+    out = {'RECM_mm': np.sqrt(np.mean((pred_pent - ref_p)**2)), 'sesgo_%': 100 * (pred_pent.sum() / ref_p.sum() - 1)}
     if pred_fina is not None:
         t, ref_f = D['t_fina'], D['estacion_mm']
         out['L2_relativo'] = np.mean(np.sqrt(np.trapezoid((pred_fina - ref_f)**2, t, axis=1) / np.trapezoid(ref_f**2, t, axis=1)))
@@ -193,9 +198,9 @@ def metricas(D, pred_pent, pred_fina=None):
     return out
 
 def referencias(D):
-    filas = {'Satélite sin corregir (péntadas)': metricas(D, D['satelite_obs']),
-             'Satélite sin corregir (curva)': metricas(D, D['satelite_mm'][:, D['filas']], D['satelite_mm']),
-             'Climatología de entrenamiento': metricas(D, np.tile(D['climatologia'], (D['va'].sum(), 1)))}
+    n = D['va'].sum()
+    filas = {'Satélite sin corregir': metricas(D, D['satelite_pent'], D['satelite_mm']),
+             'Climatología de entrenamiento': metricas(D, np.tile(D['climatologia'], (n, 1)), np.tile(D['climatologia_fina'], (n, 1)))}
     for m, p in D['regresion'].items(): filas[f'Regresión: {m}'] = metricas(D, p)
     return pd.DataFrame(filas).T
 
@@ -275,15 +280,20 @@ def grafica_oni_curva(D, anios=(1997, 1998, 1999)):
     ax.axhline(0, color='k', lw=.5); ax.set(xlabel='Péntada', ylabel='ONI', title='ONI como curva'); ax.legend(frameon=False)
     return fig
 
-def grafica_q_M(e1, referencia, limites=(27.5, 30.5)):
+def grafica_q_M(e1, referencia):
+    # Escala de color común a las tres cabezas, con los valores mínimo y máximo de la tabla
+    medias = e1.groupby(['cabeza', 'q', 'M']).RECM_mm.mean()
+    limites = (medias.min(), medias.max()); mitad = np.mean(limites)
     fig, axes = plt.subplots(1, 3, figsize=(14, 3.8), sharey=True)
     for ax, cabeza in zip(axes, CABEZAS):
-        tabla = e1[e1.cabeza == cabeza].groupby(['q', 'M']).RECM_mm.mean().unstack()
+        tabla = medias[cabeza].unstack()
         im = ax.imshow(tabla, cmap='viridis_r', vmin=limites[0], vmax=limites[1], aspect='auto')
         ax.set(xticks=range(tabla.shape[1]), xticklabels=tabla.columns, yticks=range(tabla.shape[0]),
                yticklabels=tabla.index, xlabel='M', title=cabeza)
         for i in range(tabla.shape[0]):
-            for j in range(tabla.shape[1]): ax.text(j, i, f'{tabla.iat[i, j]:.2f}', ha='center', va='center', fontsize=8, color='w')
+            for j in range(tabla.shape[1]):
+                ax.text(j, i, f'{tabla.iat[i, j]:.2f}', ha='center', va='center', fontsize=8,
+                        color='k' if tabla.iat[i, j] < mitad else 'w')
     axes[0].set_ylabel('q')
     fig.colorbar(im, ax=axes, label=f'RECM en validación (mm); satélite = {referencia:.2f}')
     return fig
@@ -308,14 +318,14 @@ def grafica_pesos_oni(D, red):
     return fig
 
 def grafica_media_sesgo(D, predicciones):
-    t, obs = np.arange(1, 73), D['observado']; m_obs = np.nanmean(obs, 0)
+    t, obs = np.arange(1, 73), D['referencia']; m_obs = np.nanmean(obs, 0)
     fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-    axes[0].plot(t, m_obs, 'k', lw=2, label='Observado')
-    axes[0].plot(t, np.nanmean(D['satelite_obs'], 0), c=COLORES['Satélite'], label='Satélite')
+    axes[0].plot(t, m_obs, 'k', lw=2, label='Estación')
+    axes[0].plot(t, np.nanmean(D['satelite_pent'], 0), c=COLORES['Satélite'], label='Satélite')
     for nombre, p in predicciones.items():
         axes[0].plot(t, p[0].mean(0), c=COLORES.get(nombre), label=nombre)
         axes[1].plot(t, 100 * (p[0].mean(0) / m_obs - 1), c=COLORES.get(nombre), label=nombre)
-    axes[1].plot(t, 100 * (np.nanmean(D['satelite_obs'], 0) / m_obs - 1), c=COLORES['Satélite'], label='Satélite')
+    axes[1].plot(t, 100 * (np.nanmean(D['satelite_pent'], 0) / m_obs - 1), c=COLORES['Satélite'], label='Satélite')
     axes[0].set(xlabel='Péntada', ylabel='mm', title='Media en validación'); axes[0].legend(frameon=False)
     axes[1].axhline(0, c='k', lw=.5); axes[1].set(xlabel='Péntada', ylabel='%', title='Sesgo por péntada'); axes[1].legend(frameon=False)
     return fig
@@ -326,8 +336,7 @@ def grafica_casos(D, predicciones, referencia='KAN'):
     casos = {'Mejor': np.argmin(err), 'Típica': np.argsort(err)[len(err) // 2], 'Peor': np.argmax(err)}
     fig, axes = plt.subplots(1, 3, figsize=(15, 3.8))
     for ax, (nombre, i) in zip(axes, casos.items()):
-        ax.plot(t, D['observado'][i], 'o', ms=3, c='grey', label='Observado')
-        ax.plot(D['t_fina'], D['estacion_mm'][i], 'k', lw=2, label='Estación (MCP)')
+        ax.plot(D['t_fina'], D['estacion_mm'][i], 'k', lw=2, label='Estación')
         ax.plot(D['t_fina'], D['satelite_mm'][i], c=COLORES['Satélite'], label='Satélite')
         for c, p in predicciones.items(): ax.plot(D['t_fina'], p[1][i], c=COLORES.get(c), label=c)
         ax.set(title=f'{nombre}: {D["curvas_va"][i]}', xlabel='Péntada', ylabel='mm')
@@ -351,7 +360,7 @@ def grafica_fpca(D, m):
     fp, _, _ = fpca_estaciones(D, m)
     fig, ax = plt.subplots(figsize=(7, 3.4))
     for k in range(m): ax.plot(np.arange(1, 73), fp['base'][k], label=f'$\\psi_{k+1}$')
-    ax.axhline(0, c='k', lw=.5); ax.set(title='Funciones propias de la FPCA (escala √P)', xlabel='Péntada'); ax.legend(frameon=False, fontsize=8)
+    ax.axhline(0, c='k', lw=.5); ax.set(title='Funciones propias de la FPCA (escala raiz de P)', xlabel='Péntada'); ax.legend(frameon=False, fontsize=8)
     return fig
 
 def nombres_entradas(D, red, oni):
@@ -399,43 +408,44 @@ def grafica_puntajes(D, red, m, oni):
     return fig
 
 def grafica_error_pentada(D, predicciones, referencia='KAN'):
-    t, obs = np.arange(1, 73), D['observado']
+    t, obs = np.arange(1, 73), D['referencia']
     fig, axes = plt.subplots(1, 2, figsize=(14, 4))
     for c, p in predicciones.items():
         axes[0].plot(t, np.sqrt(np.nanmean((p[0] - obs)**2, 0)), c=COLORES.get(c), label=c)
-    axes[0].plot(t, np.sqrt(np.nanmean((D['satelite_obs'] - obs)**2, 0)), c=COLORES['Satélite'], label='Satélite')
+    axes[0].plot(t, np.sqrt(np.nanmean((D['satelite_pent'] - obs)**2, 0)), c=COLORES['Satélite'], label='Satélite')
     axes[0].set(title='RECM por péntada', xlabel='Péntada', ylabel='mm'); axes[0].legend(frameon=False)
     res = predicciones[referencia][0] - obs; m_res, s_res = np.nanmean(res, 0), np.nanstd(res, 0)
-    axes[1].fill_between(t, m_res - s_res, m_res + s_res, color=COLORES[referencia], alpha=.2, label='± 1 desv.')
+    axes[1].fill_between(t, m_res - s_res, m_res + s_res, color=COLORES[referencia], alpha=.2, label='+- 1 desv.')
     axes[1].plot(t, m_res, c=COLORES[referencia], lw=2, label=f'Residuo medio {referencia}')
-    axes[1].plot(t, np.nanmean(D['satelite_obs'] - obs, 0), c=COLORES['Satélite'], label='Residuo medio satélite')
-    axes[1].axhline(0, c='k', lw=.5); axes[1].set(title='Residuo (predicho − observado)', xlabel='Péntada', ylabel='mm')
+    axes[1].plot(t, np.nanmean(D['satelite_pent'] - obs, 0), c=COLORES['Satélite'], label='Residuo medio satélite')
+    axes[1].axhline(0, c='k', lw=.5); axes[1].set(title='Residuo (predicho - estación)', xlabel='Péntada', ylabel='mm')
     axes[1].legend(frameon=False)
     return fig
 
 def grafica_mapa_residuos(D, prediccion, titulo):
-    res = prediccion - D['observado']; orden = np.argsort(D['altitud'][D['va']])
+    res = prediccion - D['referencia']; orden = np.argsort(D['altitud'][D['va']])
     fig, ax = plt.subplots(figsize=(12, 5))
-    im = ax.imshow(res[orden], aspect='auto', cmap='RdBu_r', vmin=-60, vmax=60, interpolation='nearest')
+    limite = np.percentile(np.abs(res), 98)
+    im = ax.imshow(res[orden], aspect='auto', cmap='RdBu_r', vmin=-limite, vmax=limite, interpolation='nearest')
     ax.set(xlabel='Péntada', ylabel='Curvas de validación (por altitud, de menor a mayor)', title=titulo)
-    fig.colorbar(im, ax=ax, label='predicho − observado (mm)')
+    fig.colorbar(im, ax=ax, label='predicho - estación (mm)')
     return fig
 
 # Error y sesgo por curva según altitud y fase ENSO (ventana DEF, criterio NOAA)
 def diagnostico_altitud_enso(D, prediccion, nombre='KAN'):
-    obs = D['observado']
+    obs = D['referencia']
     rmse = lambda p: np.sqrt(np.nanmean((p - obs)**2, 1))
     sesgo = lambda p: 100 * (np.nansum(np.where(np.isnan(obs), np.nan, p), 1) / np.nansum(obs, 1) - 1)
     diag = pd.DataFrame({'altitud': D['altitud'][D['va']], 'fase': D['fase_def'],
-                         f'RECM_{nombre}': rmse(prediccion), 'RECM_satelite': rmse(D['satelite_obs']),
-                         f'sesgo_{nombre}': sesgo(prediccion), 'sesgo_satelite': sesgo(D['satelite_obs'])})
+                         f'RECM_{nombre}': rmse(prediccion), 'RECM_satelite': rmse(D['satelite_pent']),
+                         f'sesgo_{nombre}': sesgo(prediccion), 'sesgo_satelite': sesgo(D['satelite_pent'])})
     fig, axes = plt.subplots(1, 3, figsize=(15, 3.8))
     axes[0].plot(diag.altitud, diag.RECM_satelite - diag[f'RECM_{nombre}'], '.', ms=3, alpha=.6); axes[0].axhline(0, c='k', lw=.5)
-    axes[0].set(xlabel='Altitud (m)', ylabel=f'RECM satélite − RECM {nombre} (mm)', title=f'Ganancia de la {nombre} según altitud')
+    axes[0].set(xlabel='Altitud (m)', ylabel=f'RECM satélite - RECM {nombre} (mm)', title=f'Ganancia de la {nombre} según altitud')
     axes[1].plot(diag.altitud, diag[f'sesgo_{nombre}'], '.', ms=3, alpha=.6, c=COLORES.get(nombre), label=nombre)
     axes[1].plot(diag.altitud, diag.sesgo_satelite, '.', ms=3, alpha=.4, c=COLORES['Satélite'], label='Satélite')
     axes[1].axhline(0, c='k', lw=.5)
-    axes[1].set(xlabel='Altitud (m)', ylabel='Sesgo del acumulado (%)', title='Sesgo según altitud', ylim=(-100, 150)); axes[1].legend(frameon=False)
+    axes[1].set(xlabel='Altitud (m)', ylabel='Sesgo del acumulado (%)', title='Sesgo según altitud'); axes[1].legend(frameon=False)
     grupos = ['La Niña', 'Neutral', 'El Niño']
     axes[2].boxplot([diag.loc[diag.fase == g, f'sesgo_{nombre}'] for g in grupos], tick_labels=grupos, showfliers=False)
     axes[2].axhline(0, c='k', lw=.5); axes[2].set(ylabel=f'Sesgo del acumulado {nombre} (%)', title='Sesgo según fase ENSO (ventana DEF)')

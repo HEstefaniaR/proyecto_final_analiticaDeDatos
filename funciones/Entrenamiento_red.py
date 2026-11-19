@@ -19,8 +19,7 @@ INTERVALOS_KAN = 12
 # Escala del modelo: 'raiz' (raiz de P) o 'log1p' (log(1 + P)), aplicada a la curva ya suavizada en mm;
 # con None no se entrena
 ESCALA = 'raiz'
-# Componentes del decodificador FPCA: M = 5 explica el 96 % de la varianza;
-# con M = 6 la FPCA reproduce completa la base de estaciones (K = 6) y no reduce la dimensión
+# Componentes del decodificador FPCA (M = 5 explica el 96 % de la varianza)
 COMPONENTES_RED = (5,)
 # Malla de lambda para la penalización de rugosidad; se elige por validación
 LAMBDAS_RUGOSIDAD = (1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3, 1e4)
@@ -80,7 +79,7 @@ class NormalizadorCovariables:
         return self
     def transformar(self, cov): return (cov-self.media)/self.desviacion
 
-# Neuronas funcionales z = A W c
+# Neuronas funcionales
 class CodificadorFuncional(nn.Module):
     def __init__(self, gram, neuronas=8, rugosidad=None):
         super().__init__()
@@ -163,7 +162,7 @@ def revisar_configuraciones_cabeza_lineal(datos, W, R, cov_norm, normalizador, s
                 errores.append(verificar_equivalencia_lineal(modelo, c, cov, mu, psi))
     salida.mkdir(parents=True, exist_ok=True)
     np.savez(salida/'normalizador_covariables.npz', media=normalizador.media, desviacion=normalizador.desviacion)
-    print(f'Configuraciones comprobadas: {len(errores)} ({len(neuronas)} q × {len(componentes)} M × {len(semillas)} semillas).')
+    print(f'Configuraciones comprobadas: {len(errores)} ({len(neuronas)} q x {len(componentes)} M x {len(semillas)} semillas).')
     print(f'Máximo error de equivalencia sintética: {max(errores):.3e} (no es FPCA real).')
     print('Sin entrenamiento ni selección de q o M.')
     print('Único archivo generado:', salida/'normalizador_covariables.npz')
@@ -292,7 +291,7 @@ def ajustar_simbolica(capa, salida, entrada, x):
     coeficientes = torch.linalg.lstsq(matriz[::2], valores[::2]).solution
     ajuste = matriz @ coeficientes
     variacion = (valores[1::2] - valores[1::2].mean()).square().sum()
-    # R² queda indefinido para una activación constante
+    # R2 queda indefinido para una activación constante
     r2 = float('nan')
     if variacion > 0:
         r2 = (1 - (valores[1::2] - ajuste[1::2]).square().sum() / variacion).item()
@@ -328,7 +327,7 @@ def fit_fpca(curvas, n_componentes):
     explicada = sing**2 / np.sum(sing**2)
     return {'media': media, 'base': Vt[:n_componentes], 'explicada': explicada}
 
-# Decodificador funcional: puntajes s (B, M) -> curva y(t) = mu(t) + sum_m s_m psi_m(t)  (B, 72)
+# Decodificador funcional: de los puntajes a la curva
 # mu y psi son buffers: viajan en el state_dict pero NO se entrenan
 class DecodificadorFPCA(nn.Module):
     def __init__(self, n_puntos=72, m_fpca=5):
@@ -390,7 +389,7 @@ def cargar_datos_red(carpeta='Curvas', escala='raiz'):
             't': t, 'filas_pentadas': filas, 'phi_sat': phi_sat, 'phi_est': phi_est}
 
 # MLP con el número de neuronas ocultas que deja sus parámetros más cerca de los de la KAN
-# Parámetros del MLP: (q + 2) h + h + h M + M = h (q + M + 3) + M
+# Neuronas ocultas del MLP para igualar los parámetros de la KAN
 def neuronas_ocultas_mlp(q, m):
     n_kan = contar_parametros(CabezaKAN(q, m))
     return max(1, round((n_kan - m) / (q + m + 3)))
@@ -414,8 +413,7 @@ def preparar_fpca(datos, m):
     mu_c, psi_c, error = coeficientes_fpca(fpca_escalada, phi)
     return fpca_escalada, mu_c, psi_c, error
 
-# Pérdida L² funcional: (c_hat - c)' W (c_hat - c), con c_hat = mu_c + s psi_c en la base de estaciones,
-# más la penalización de rugosidad lambda * sum_k a_k' R a_k de las funciones de pesos w_k(t)
+# Pérdida L2 funcional más la penalización de rugosidad de las funciones de pesos
 class PerdidaFuncional(nn.Module):
     def __init__(self, gram_estaciones, mu_c, psi_c, lam):
         super().__init__()
@@ -430,7 +428,7 @@ class PerdidaFuncional(nn.Module):
     def forward(self, puntajes, c, codificador):
         return self.error_l2(puntajes, c) + self.lam * codificador.penalizacion_rugosidad()
 
-# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L² de validación
+# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L2 de validación
 # La validación se evalúa en cada época; se guarda el estado con menor pérdida de validación
 def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e, fpca, mu_c, psi_c, cov_norm,
                  epocas=EPOCAS_MAXIMAS, paciencia=PACIENCIA):
@@ -470,9 +468,7 @@ def reconstruir_mm(c_escala, phi_fina, escala):
     recortados = 100 * np.mean(curva < 0)
     return TRANSFORMACIONES[escala][1](np.maximum(curva, 0)), recortados
 
-# Equivalencia de la cabeza lineal con la regresión función a función:
-# y(t) = mu(t) + b psi(t) + [cov] B_cov psi(t) + integral beta(s, t) X(s) ds, con beta(s, t) = sum_k sum_m w_k(s) B_km psi_m(t)
-# La integral se calcula por cuadratura en la malla fina y se compara con la salida de la red
+# Equivalencia de la cabeza lineal con la regresión función a función (integral por cuadratura)
 @torch.no_grad()
 def verificar_regresion_funcional(modelo, datos, fpca, cov_norm, idx):
     q = modelo.codificador.n_neuronas
