@@ -1415,23 +1415,61 @@ resumen_cobertura_eda <- data.frame(
 resumen_cobertura_eda
 guardar_tabla(resumen_cobertura_eda, "05_exploratorio_resumen_cobertura.csv")
 
-# Media funcional y comprobación
-media_eda <- data.frame(pentada = seq(min(tiempos), max(tiempos), by = 0.5))
+# Curvas emparejadas en la malla del EDA
+pentadas_eda <- seq(min(tiempos), max(tiempos), by = 0.5)
 curvas_eda_fd <- list()
+valores_eda <- list()
+for (fuente in names(fuentes_eda)) {
+  fuentes_eda[[fuente]] <- fuentes_eda[[fuente]][pares_eda, , drop = FALSE]
+  coeficientes_eda[[fuente]] <- coeficientes_eda[[fuente]][, pares_eda, drop = FALSE]
+  curvas_eda_fd[[fuente]] <- fd(coeficientes_eda[[fuente]], bases_eda[[fuente]],
+                                list("Péntada", pares_eda, "Precipitación (mm)"))
+  valores_eda[[fuente]] <- eval.fd(pentadas_eda, curvas_eda_fd[[fuente]])
+}
+
+# Precipitación observada por péntada
+limites_observados_eda <- range(unlist(fuentes_eda), finite = TRUE)
+colores_curvas_eda <- c(terrestre = "steelblue", satelital = "darkorange")
+par_curvas_eda <- par(mfrow = c(1, 2), bg = "white")
+dev.control(displaylist = "enable")
+matplot(tiempos, t(fuentes_eda$satelital), type = "o", pch = 1, cex = 0.35, lty = 1,
+        col = adjustcolor(colores_curvas_eda[["satelital"]], alpha.f = 0.12),
+        ylim = limites_observados_eda, xlab = "Péntada", ylab = "Precipitación observada (mm)",
+        main = "Satélite")
+matplot(tiempos, t(fuentes_eda$terrestre), type = "o", pch = 1, cex = 0.35, lty = 1,
+        col = adjustcolor(colores_curvas_eda[["terrestre"]], alpha.f = 0.12),
+        ylim = limites_observados_eda, xlab = "Péntada", ylab = "Precipitación observada (mm)",
+        main = "Estaciones")
+guardar_figura("05_exploratorio_observados.png", 12, 5)
+# Los valores observados de estaciones alcanzan picos más altos que los del satélite
+
+# Curvas ajustadas de precipitación por péntada
+limites_curvas_eda <- range(unlist(valores_eda))
+matplot(pentadas_eda, valores_eda$satelital, type = "l", lty = 1,
+        col = adjustcolor(colores_curvas_eda[["satelital"]], alpha.f = 0.12),
+        ylim = limites_curvas_eda, xlab = "Péntada", ylab = "Precipitación ajustada (mm)",
+        main = "Satélite")
+matplot(pentadas_eda, valores_eda$terrestre, type = "l", lty = 1,
+        col = adjustcolor(colores_curvas_eda[["terrestre"]], alpha.f = 0.12),
+        ylim = limites_curvas_eda, xlab = "Péntada", ylab = "Precipitación ajustada (mm)",
+        main = "Estaciones")
+guardar_figura("05_exploratorio_curvas_ajustadas.png", 12, 5)
+par(par_curvas_eda)
+# Las curvas de estaciones abarcan un rango más amplio, con algunos ajustes por debajo de 0 mm
+
+# Media funcional y comprobación
+media_eda <- data.frame(pentada = pentadas_eda)
 coeficientes_medios_eda <- list()
 media_eda_fd <- list()
 error_media_eda <- numeric()
-for (fuente in names(fuentes_eda)) {
-  fuentes_eda[[fuente]] <- fuentes_eda[[fuente]][pares_eda, , drop = FALSE]
-  coefs <- coeficientes_eda[[fuente]][, pares_eda, drop = FALSE]
-  coeficientes_eda[[fuente]] <- coefs
+for (fuente in names(curvas_eda_fd)) {
+  coefs <- coeficientes_eda[[fuente]]
   base_eda <- bases_eda[[fuente]]
   
   coeficientes_medios_eda[[fuente]] <- rowMeans(coefs)
   Phi_media_eda <- eval.basis(media_eda$pentada, base_eda)
   media_eda[[fuente]] <- as.vector(Phi_media_eda %*% coeficientes_medios_eda[[fuente]])
   
-  curvas_eda_fd[[fuente]] <- fd(coefs, base_eda, list("Péntada", pares_eda, "Precipitación (mm)"))
   media_eda_fd[[fuente]] <- mean.fd(curvas_eda_fd[[fuente]])
   media_libreria <- eval.fd(media_eda$pentada, media_eda_fd[[fuente]])
   error_media_eda[fuente] <- max(abs(media_eda[[fuente]] - media_libreria))
@@ -1456,14 +1494,12 @@ guardar_figura("05_exploratorio_media.png", 8, 5)
 
 
 # Varianza y desviación estándar entre curvas estación-año
-valores_eda <- list()
 varianza_eda <- data.frame(pentada = media_eda$pentada)
 desviacion_eda <- data.frame(pentada = media_eda$pentada)
 error_varianza_eda <- numeric()
 error_desviacion_eda <- numeric()
 resumen_dispersion_eda <- data.frame()
 for (fuente in names(curvas_eda_fd)) {
-  valores_eda[[fuente]] <- eval.fd(media_eda$pentada, curvas_eda_fd[[fuente]])
   n_curvas_eda <- ncol(valores_eda[[fuente]])
   diferencias_eda <- valores_eda[[fuente]] - media_eda[[fuente]]
   varianza_eda[[fuente]] <- apply(diferencias_eda^2, 1, sum) / (n_curvas_eda - 1)
@@ -1517,7 +1553,6 @@ par(par_dispersion_eda)
 
 
 # Covarianza y correlación funcionales de cada fuente
-pentadas_eda <- media_eda$pentada
 covarianza_eda <- list()
 correlacion_eda <- list()
 comprobacion_cov_cor_eda <- data.frame()
@@ -1582,6 +1617,46 @@ guardar_tabla(covariacion_temporadas_eda, "05_exploratorio_covariacion_abril_nov
 # de la media de noviembre; la covarianza mayor de estaciones incluye su mayor dispersión
 # La correlación se calculó reuniendo estaciones y años; no muestra si la relación se mantiene
 # dentro de cada estación o al separar los años por fase ENSO
+
+
+# Covarianza y correlación cruzadas entre satélite y estaciones
+sat_centrado_eda <- valores_eda$satelital - media_eda$satelital
+est_centrado_eda <- valores_eda$terrestre - media_eda$terrestre
+covarianza_cruzada_eda <- tcrossprod(sat_centrado_eda, est_centrado_eda) / (length(pares_eda) - 1)
+correlacion_cruzada_eda <- covarianza_cruzada_eda /
+  outer(desviacion_eda$satelital, desviacion_eda$terrestre)
+diagonal_cruzada_eda <- diag(correlacion_cruzada_eda)
+
+covarianza_cruzada_R <- eval.bifd(pentadas_eda, pentadas_eda,
+                                 var.fd(curvas_eda_fd$satelital, curvas_eda_fd$terrestre))
+correlacion_cruzada_R <- cor.fd(pentadas_eda, curvas_eda_fd$satelital,
+                               pentadas_eda, curvas_eda_fd$terrestre)
+
+# Diferencias máximas frente a fda y resumen de la diagonal
+c(covarianza_mm2 = max(abs(covarianza_cruzada_eda - covarianza_cruzada_R)),
+  correlacion = max(abs(correlacion_cruzada_eda - correlacion_cruzada_R)))
+summary(diagonal_cruzada_eda)
+
+par_cor_cruzada_eda <- par(mfrow = c(1, 1), bg = "white")
+contour(pentadas_eda, pentadas_eda, covarianza_cruzada_eda,
+        xlab = "Péntada s: satélite", ylab = "Péntada t: estaciones",
+        main = "Covarianza cruzada (mm²)")
+guardar_figura("05_exploratorio_covarianza_cruzada.png", 7, 6)
+
+par(mfrow = c(1, 2))
+image(pentadas_eda, pentadas_eda, correlacion_cruzada_eda,
+      zlim = c(-1, 1), col = hcl.colors(40, "Blue-Red 3"),
+      xlab = "Péntada s: satélite", ylab = "Péntada t: estaciones",
+      main = "Correlación cruzada")
+contour(pentadas_eda, pentadas_eda, correlacion_cruzada_eda, levels = seq(-1, 1, 0.2), add = TRUE)
+abline(0, 1, lty = 3, col = "red")
+plot(pentadas_eda, diagonal_cruzada_eda, type = "l", lwd = 2, col = "darkblue", ylim = c(-1, 1),
+     xlab = "Péntada", ylab = "Correlación", main = "Diagonal de la correlación cruzada")
+abline(h = 0, lty = 3)
+guardar_figura("05_exploratorio_correlacion_cruzada.png", 12, 5)
+par(par_cor_cruzada_eda)
+# En la misma péntada, la correlación entre ambas fuentes varía de 0,32 a 0,69
+# Los pares con más lluvia en una fuente tienden a mostrar más lluvia en la otra
 
 
 # Primera derivada de las curvas de precipitación por péntada
@@ -1678,6 +1753,30 @@ guardar_figura("05_exploratorio_derivada_media.png", 8, 5)
 # La pendiente negativa después de cada máximo indica que disminuye la cantidad de lluvia por péntada,
 # aunque todavía puede estar por encima del umbral de la temporada lluviosa
 
+
+# Diferencia funcional por par estación-año
+diferencia_curvas_eda <- valores_eda$terrestre - valores_eda$satelital
+diferencia_media_eda <- rowMeans(diferencia_curvas_eda)
+ee_diferencia_eda <- apply(diferencia_curvas_eda, 1, sd) / sqrt(ncol(diferencia_curvas_eda))
+inferior_diferencia_eda <- diferencia_media_eda - 2 * ee_diferencia_eda
+superior_diferencia_eda <- diferencia_media_eda + 2 * ee_diferencia_eda
+
+par_diferencia_eda <- par(mfrow = c(1, 2), bg = "white")
+matplot(pentadas_eda, diferencia_curvas_eda, type = "l", lty = 1,
+        col = adjustcolor("grey40", alpha.f = 0.12),
+        xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Diferencias por par")
+lines(pentadas_eda, diferencia_media_eda, lwd = 2, col = "darkred")
+abline(h = 0, lty = 3)
+plot(pentadas_eda, diferencia_media_eda, type = "l", lwd = 2, col = "darkred",
+     ylim = range(0, inferior_diferencia_eda, superior_diferencia_eda),
+     xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Diferencia media ± 2 EE")
+lines(pentadas_eda, inferior_diferencia_eda, lty = 2, col = "darkred")
+lines(pentadas_eda, superior_diferencia_eda, lty = 2, col = "darkred")
+abline(h = 0, lty = 3)
+guardar_figura("05_exploratorio_diferencia_funcional.png", 12, 5)
+par(par_diferencia_eda)
+# La diferencia media es negativa cerca de ambos picos lluviosos
+# La banda de ±2 EE es descriptiva porque hay estaciones repetidas y píxeles compartidos
 
 
 # Profundidad de Fraiman-Muniz y boxplot funcional con MBD
@@ -1900,6 +1999,698 @@ resumen_comp <- data.frame(
 )
 resumen_comp
 guardar_tabla(resumen_comp, "07_comparacion_resumen.csv")
+
+
+##### Comparación funcional entre estación y satélite #####
+# Diferencias anuales de la red completa
+stopifnot(identical(colnames(diferencia_curvas_eda), as.character(metadatos_eda$curva)),
+          !anyDuplicated(metadatos_eda[, c("STATION_ID", "YEAR")]))
+diferencia_por_anio <- function(incluir, anios) {
+  sapply(anios, function(anio) {
+    pares <- which(incluir & metadatos_eda$YEAR == anio)
+    rowMeans(diferencia_curvas_eda[, pares, drop = FALSE])
+  })
+}
+anios_red <- sort(unique(metadatos_eda$YEAR))
+D_red <- diferencia_por_anio(rep(TRUE, nrow(metadatos_eda)), anios_red)
+n_red <- length(anios_red)
+
+# Prueba t pareada de la red con un signo por curva anual
+B_comparacion <- 5000
+alfa_comparacion <- 0.05
+p_maximo <- function(maximos_nulos, observado) {
+  (1 + sum(maximos_nulos >= observado - 1e-12)) / (length(maximos_nulos) + 1)
+}
+intervalos_pentadas <- function(indicador, malla = pentadas_eda) {
+  r <- rle(indicador)
+  if (!any(r$values)) {
+    return(data.frame(inicio_pentada = numeric(0), fin_pentada = numeric(0), puntos = integer(0)))
+  }
+  fin <- cumsum(r$lengths)
+  ini <- fin - r$lengths + 1
+  data.frame(inicio_pentada = malla[ini[r$values]],
+             fin_pentada = malla[fin[r$values]],
+             puntos = r$lengths[r$values])
+}
+set.seed(2026)
+signos_red <- matrix(sample(c(-1, 1), n_red * B_comparacion, replace = TRUE), nrow = n_red)
+media_red <- rowMeans(D_red)
+ee_red <- apply(D_red, 1, sd) / sqrt(n_red)
+stopifnot(n_red >= 2, all(is.finite(ee_red) & ee_red > 0))
+t_obs <- media_red / ee_red
+medias_nulas <- D_red %*% signos_red / n_red
+ee_nulos <- sqrt((rowMeans(D_red^2) - medias_nulas^2) / (n_red - 1))
+t_nulos <- abs(medias_nulas / ee_nulos)
+t_max_nulos <- apply(t_nulos, 2, max)
+c_puntual_t <- apply(t_nulos, 1, quantile, probs = 1 - alfa_comparacion)
+c_maximo_t <- unname(quantile(t_max_nulos, 1 - alfa_comparacion))
+p_puntual_t <- (1 + rowSums(t_nulos >= abs(t_obs) - 1e-12)) / (B_comparacion + 1)
+pico_t <- which.max(abs(t_obs))
+t_por_pentada <- data.frame(
+  zona = "Red completa", pentada = pentadas_eda, media_mm = media_red,
+  EE_mm = ee_red, t = t_obs, c_puntual = c_puntual_t, c_maximo = c_maximo_t,
+  p_puntual = p_puntual_t, significativa = abs(t_obs) > c_maximo_t
+)
+t_red <- data.frame(
+  t_por_pentada[pico_t, c("zona", "pentada", "media_mm", "EE_mm", "t")],
+  anios = n_red, c_maximo = c_maximo_t,
+  p_global = p_maximo(t_max_nulos, abs(t_obs[pico_t]))
+)
+t_red
+guardar_tabla(t_red, "06_comparacion_t_pareada_red.csv")
+guardar_tabla(t_por_pentada, "06_comparacion_t_por_pentada.csv")
+
+# Tramos del año donde |t(t)| supera el valor crítico máximo (error global 0,05)
+intervalos_t_red <- intervalos_pentadas(abs(t_obs) > c_maximo_t)
+for (k in seq_len(nrow(intervalos_t_red))) {
+  idx <- which(pentadas_eda >= intervalos_t_red$inicio_pentada[k] &
+                 pentadas_eda <= intervalos_t_red$fin_pentada[k])
+  j <- idx[which.max(abs(t_obs[idx]))]
+  intervalos_t_red$media_min_mm[k] <- min(media_red[idx])
+  intervalos_t_red$media_max_mm[k] <- max(media_red[idx])
+  intervalos_t_red$pico_pentada[k] <- pentadas_eda[j]
+  intervalos_t_red$pico_t[k] <- t_obs[j]
+}
+intervalos_t_red
+guardar_tabla(intervalos_t_red, "06_comparacion_t_intervalos.csv")
+
+png("Figuras/06_comparacion_t_pareada.png", width = 10, height = 4.5, units = "in", res = 150)
+par(mfrow = c(1, 2))
+matplot(pentadas_eda, D_red, type = "l", lty = 1, col = "grey60",
+        xlab = "Péntada", ylab = "Estación - satélite (mm)",
+        main = "Diferencias pareadas por año")
+lines(pentadas_eda, media_red, lwd = 2, col = "red")
+lines(pentadas_eda, media_red + 2 * ee_red, lty = 2, col = "red")
+lines(pentadas_eda, media_red - 2 * ee_red, lty = 2, col = "red")
+abline(h = 0, lty = 3)
+plot(pentadas_eda, abs(t_obs), type = "l", lwd = 2, col = "red",
+     xlab = "Péntada", ylab = "|t(t)|",
+     main = "Prueba pareada por cambio de signo",
+     ylim = c(0, max(abs(t_obs), c_maximo_t) * 1.35))
+lines(pentadas_eda, c_puntual_t, col = "blue", lty = 3, lwd = 2)
+abline(h = c_maximo_t, col = "black", lty = 2)
+legend("topleft", c("Estadístico observado", "Valor crítico puntual (0.05)", "Valor crítico máximo"),
+       col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
+dev.off()
+# Con c_maximo = 3,43, la diferencia global resulta significativa en cinco tramos del año
+# El satélite supera a las estaciones en 21-31,5, 48,5-50, 54,5-60 y 70,5-72 (máximo -21,25 mm en la 72)
+# En 66-68,5 la relación se invierte y las estaciones superan al satélite (hasta +6,01 mm en la 67,5)
+
+##### ANOVA funcional por subregión #####
+# Polígonos de paisaje y relieve del IGAC (1:100.000) y zonificación hidrográfica del IDEAM (2025)
+archivo_cartografia <- "data/Paisajes_IGAC_hidrografia_IDEAM.gpkg"
+paisajes <- vect(archivo_cartografia, layer = "paisajes_IGAC")
+hidrografia <- vect(archivo_cartografia, layer = "hidrografia_IDEAM")
+estaciones_zonas <- unique(metadatos_eda[, c("STATION_ID", "longitud", "latitud")])
+stopifnot(!anyDuplicated(estaciones_zonas$STATION_ID))
+puntos_zonas <- vect(estaciones_zonas, geom = c("longitud", "latitud"), crs = "EPSG:4326")
+paisaje_punto <- terra::extract(paisajes, project(puntos_zonas, crs(paisajes)))
+cuenca_punto <- terra::extract(hidrografia, project(puntos_zonas, crs(hidrografia)))
+stopifnot(identical(as.integer(paisaje_punto$id.y), seq_len(nrow(estaciones_zonas))),
+          identical(as.integer(cuenca_punto$id.y), seq_len(nrow(estaciones_zonas))))
+estaciones_zonas$en_departamento <- is.related(project(puntos_zonas, crs(valle)), valle, "intersects")
+estaciones_zonas$paisaje <- paisaje_punto$PAISAJE
+estaciones_zonas$relieve <- paisaje_punto$TIPO_RELIEVE
+estaciones_zonas$area_hidrografica <- cuenca_punto$nom_ah
+estaciones_zonas$zona_hidrografica <- cuenca_punto$nombre_zh
+
+# Asignación de las planicies por vertiente y del paisaje de montaña en ambas cordilleras
+zona_relieve <- function(paisaje, area_hidrografica, zona_hidrografica) {
+  case_when(
+    grepl("^Montaña", paisaje) ~ "Montaña",
+    grepl("^Planicie", paisaje) & area_hidrografica == "Pacifico" ~ "Costa",
+    grepl("^Planicie", paisaje) & zona_hidrografica == "Cauca" ~ "Valle",
+    TRUE ~ NA_character_
+  )
+}
+estaciones_zonas$zona <- with(estaciones_zonas, zona_relieve(paisaje, area_hidrografica, zona_hidrografica))
+estaciones_zonas$zona[!estaciones_zonas$en_departamento] <- NA_character_
+table(estaciones_zonas$paisaje, estaciones_zonas$zona, useNA = "ifany")
+guardar_tabla(estaciones_zonas, "06_comparacion_estaciones_subregion.csv")
+
+# Unidades de relieve y estaciones sobre el contorno departamental
+montanas <- paisajes[grepl("^Montaña", paisajes$PAISAJE), ]
+planicies <- paisajes[grepl("^Planicie", paisajes$PAISAJE), "PAISAJE"]
+planicies <- terra::intersect(makeValid(planicies), makeValid(hidrografia[, c("nom_ah", "nombre_zh")]))
+planicies$zona <- zona_relieve(planicies$PAISAJE, planicies$nom_ah, planicies$nombre_zh)
+colores_zonas <- c(Costa = "steelblue", Montaña = "sienna", Valle = "darkgreen")
+colores_puntos <- unname(colores_zonas[estaciones_zonas$zona])
+colores_puntos[is.na(colores_puntos)] <- "grey65"
+png("Figuras/06_estaciones_subregion.png", width = 8, height = 7, units = "in", res = 150)
+plot(valle, col = "grey97", border = "grey35", main = "Estaciones y subregiones del Valle del Cauca")
+plot(montanas, col = "wheat2", border = NA, add = TRUE)
+plot(planicies[planicies$zona == "Costa", ], col = "lightblue", border = NA, add = TRUE)
+plot(planicies[planicies$zona == "Valle", ], col = "darkseagreen2", border = NA, add = TRUE)
+lines(valle, col = "grey35")
+points(project(puntos_zonas, crs(valle)), pch = 20, col = colores_puntos, cex = 0.9)
+legend(xmin(valle) + 0.03, ymax(valle) - 0.02, legend = c(names(colores_zonas), "Sin asignar"), col = c(colores_zonas, "grey65"),
+       pch = 20, bty = "n")
+dev.off()
+
+# Pares estación-año por subregión y años comunes para el ANOVA
+zonas <- names(colores_zonas)
+zona_par <- estaciones_zonas$zona[match(metadatos_eda$STATION_ID, estaciones_zonas$STATION_ID)]
+cobertura_zonas <- table(anio = metadatos_eda$YEAR, zona = factor(zona_par, levels = zonas))
+anios_comunes <- rowSums(cobertura_zonas > 0) == length(zonas)
+cobertura_anova <- data.frame(anio = as.integer(rownames(cobertura_zonas)),
+                              as.data.frame.matrix(cobertura_zonas), incluido = anios_comunes)
+cobertura_anova
+guardar_tabla(cobertura_anova, "06_comparacion_cobertura_ANOVA.csv")
+anios_zonas <- cobertura_anova$anio[anios_comunes]
+n_anios_zonas <- length(anios_zonas)
+stopifnot(n_anios_zonas >= 2)
+diferencias_anuales <- list()
+for (zona in zonas) {
+  diferencias_anuales[[zona]] <- diferencia_por_anio(zona_par %in% zona, anios_zonas)
+}
+medias_zonas <- as.data.frame(lapply(diferencias_anuales, rowMeans))
+
+# Revisión de dispersión y homocedasticidad por subregión en los 17 años comunes
+varianzas_zonas <- sapply(zonas, function(z) apply(diferencias_anuales[[z]], 1, var))
+de_zonas <- sqrt(varianzas_zonas)
+media_global_zonas <- rowMeans(as.matrix(medias_zonas))
+pares_comunes_zonas <- metadatos_eda$YEAR %in% anios_zonas
+dispersion_zonas <- data.frame(
+  zona = zonas,
+  estaciones = sapply(zonas, function(z) n_distinct(metadatos_eda$STATION_ID[pares_comunes_zonas & zona_par %in% z])),
+  pares = sapply(zonas, function(z) sum(pares_comunes_zonas & zona_par %in% z)),
+  DE_min_mm = apply(de_zonas, 2, min),
+  DE_max_mm = apply(de_zonas, 2, max),
+  pentada_max = pentadas_eda[apply(de_zonas, 2, which.max)],
+  DE_media_mm = colMeans(de_zonas)
+)
+dispersion_zonas
+guardar_tabla(dispersion_zonas, "06_comparacion_dispersion_zonas.csv")
+
+png("Figuras/06_comparacion_ANOVA_medias_DE.png", width = 11, height = 4.5, units = "in", res = 150)
+par(mfrow = c(1, 2))
+matplot(pentadas_eda, as.matrix(medias_zonas), type = "l", lty = 1, lwd = 2, col = colores_zonas,
+        ylim = range(medias_zonas, media_global_zonas) + c(0, 15),
+        xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Medias funcionales por subregión")
+lines(pentadas_eda, media_global_zonas, lwd = 2, lty = 2)
+legend("top", c(zonas, "Global"), col = c(colores_zonas, "black"), lty = c(rep(1, length(zonas)), 2),
+       lwd = 2, bty = "n", ncol = 4, cex = 0.75)
+matplot(pentadas_eda, de_zonas, type = "l", lty = 1, lwd = 2, col = colores_zonas,
+        ylim = c(0, max(de_zonas) * 1.25),
+        xlab = "Péntada", ylab = "Desviación estándar (mm)", main = "Desviación estándar funcional por subregión")
+legend("top", zonas, col = colores_zonas, lwd = 2, bty = "n", ncol = 3, cex = 0.75)
+dev.off()
+# Costa refleja únicamente a Yurumanguí (1 estación) y tiene una DE 7 a 8 veces mayor que Montaña y Valle
+# La heterocedasticidad entre zonas descarta asumir igualdad de varianzas y motiva calibrar por cambio de signo anual
+
+# ANOVA funcional de la diferencia entre fuentes con el año como bloque
+# Centrar cada zona en la media de las tres zonas de ese mismo año elimina el efecto común del año
+n_zonas <- length(zonas)
+media_bloque <- Reduce("+", diferencias_anuales[zonas]) / n_zonas
+contrastes_zonas <- lapply(diferencias_anuales[zonas], function(D) D - media_bloque)
+SC_dentro_anios <- Reduce("+", lapply(contrastes_zonas, function(D) rowSums(D^2)))
+SC_zonas <- n_anios_zonas * Reduce("+", lapply(contrastes_zonas, function(D) rowMeans(D)^2))
+gl_zonas <- n_zonas - 1
+gl_error <- gl_zonas * (n_anios_zonas - 1)
+F_zonas <- function(SC) (SC / gl_zonas) / ((SC_dentro_anios - SC) / gl_error)
+stopifnot(all(SC_dentro_anios > SC_zonas))
+F_obs <- F_zonas(SC_zonas)
+
+# Bajo igualdad de las curvas medias, el mismo signo cambia los contrastes de un año en conjunto
+set.seed(2026)
+signos_anuales <- matrix(sample(c(-1, 1), n_anios_zonas * B_comparacion, replace = TRUE), nrow = n_anios_zonas)
+SC_zonas_nulas <- n_anios_zonas * Reduce("+", lapply(contrastes_zonas, function(D) {
+  (D %*% signos_anuales / n_anios_zonas)^2
+}))
+F_nulos <- F_zonas(SC_zonas_nulas)
+F_max_nulos <- apply(F_nulos, 2, max)
+c_puntual_F <- apply(F_nulos, 1, quantile, probs = 1 - alfa_comparacion)
+c_maximo_F <- unname(quantile(F_max_nulos, 1 - alfa_comparacion))
+p_puntual_F <- (1 + rowSums(F_nulos >= F_obs - 1e-12)) / (B_comparacion + 1)
+
+w_eda <- rep(1, length(pentadas_eda))
+w_eda[c(1, length(pentadas_eda))] <- 0.5
+SSR_n_zonas <- sum(w_eda * SC_zonas)
+SSE_n_zonas <- sum(w_eda * (SC_dentro_anios - SC_zonas))
+F_global_zonas <- (SSR_n_zonas / gl_zonas) / (SSE_n_zonas / gl_error)
+SSR_n_nulos_zonas <- as.numeric(w_eda %*% SC_zonas_nulas)
+F_global_nulos_zonas <- (SSR_n_nulos_zonas / gl_zonas) /
+  ((sum(w_eda * SC_dentro_anios) - SSR_n_nulos_zonas) / gl_error)
+
+pico_F <- which.max(F_obs)
+anova_zonas <- data.frame(
+  anios = n_anios_zonas, gl_zonas, gl_error, pentada = pentadas_eda[pico_F],
+  F_max = unname(F_obs[pico_F]), c_maximo = c_maximo_F,
+  p_global = p_maximo(F_max_nulos, F_obs[pico_F]),
+  F_integrado = F_global_zonas,
+  p_F_integrado = p_maximo(F_global_nulos_zonas, F_global_zonas)
+)
+anova_zonas
+guardar_tabla(anova_zonas, "06_comparacion_ANOVA_zonas.csv")
+anova_por_pentada <- data.frame(
+  pentada = pentadas_eda, medias_zonas, SC_zonas, SC_error = SC_dentro_anios - SC_zonas,
+  F = F_obs, c_puntual = c_puntual_F, c_maximo = c_maximo_F,
+  p_puntual = p_puntual_F, significativa = F_obs > c_maximo_F
+)
+anova_por_pentada[pico_F, ]
+guardar_tabla(anova_por_pentada, "06_comparacion_ANOVA_por_pentada.csv")
+
+# Tramos del año donde F(t) supera el valor crítico máximo (error global 0,05)
+intervalos_anova <- intervalos_pentadas(F_obs > c_maximo_F)
+for (k in seq_len(nrow(intervalos_anova))) {
+  idx <- which(pentadas_eda >= intervalos_anova$inicio_pentada[k] &
+                 pentadas_eda <= intervalos_anova$fin_pentada[k])
+  j <- idx[which.max(F_obs[idx])]
+  intervalos_anova$pico_pentada[k] <- pentadas_eda[j]
+  intervalos_anova$pico_F[k] <- F_obs[j]
+  intervalos_anova$Costa_mm[k] <- medias_zonas$Costa[j]
+  intervalos_anova$Montaña_mm[k] <- medias_zonas$Montaña[j]
+  intervalos_anova$Valle_mm[k] <- medias_zonas$Valle[j]
+}
+intervalos_anova
+guardar_tabla(intervalos_anova, "06_comparacion_ANOVA_intervalos.csv")
+
+png("Figuras/06_comparacion_ANOVA_permutacion.png", width = 11, height = 4.5, units = "in", res = 150)
+par(mfrow = c(1, 2))
+plot(pentadas_eda, F_obs, type = "l", lwd = 2, col = "red",
+     xlab = "Péntada", ylab = "F(t)",
+     main = "Prueba F puntual por permutación",
+     ylim = c(0, max(F_obs, c_maximo_F) * 1.35))
+lines(pentadas_eda, c_puntual_F, col = "blue", lty = 3, lwd = 2)
+abline(h = c_maximo_F, col = "black", lty = 2)
+legend("topleft", c("Estadístico observado", "Valor crítico puntual (0.05)", "Valor crítico máximo"),
+       col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
+hist(F_global_nulos_zonas, breaks = 50, freq = FALSE, col = "grey85", border = "white",
+     xlim = c(0, max(F_global_nulos_zonas, F_global_zonas) * 1.35),
+     xlab = expression(F[n]), main = "Distribución por permutación de F")
+abline(v = F_global_zonas, col = "red", lwd = 2)
+legend("topright", c("F observado"), col = "red", lwd = 2, bty = "n", cex = 0.8)
+dev.off()
+# Con c_maximo = 9,01, F(t) supera el umbral en tres tramos que cubren 114 de los 143 puntos del año
+# En la péntada 19 alcanza F = 41,34 y Yurumanguí registra +53,47 mm frente al satélite
+
+# Comparaciones por pares pareadas por año tras rechazar H0, con ajuste de Holm
+pares_zonas <- combn(zonas, 2, simplify = FALSE)
+n_pares_zonas <- length(pares_zonas)
+anova_pares <- data.frame()
+intervalos_pares <- data.frame()
+curvas_pares <- vector("list", n_pares_zonas)
+
+for (i in seq_len(n_pares_zonas)) {
+  par_z <- pares_zonas[[i]]
+  D_par <- diferencias_anuales[[par_z[1]]] - diferencias_anuales[[par_z[2]]]
+  media_par <- rowMeans(D_par)
+  ee_par <- apply(D_par, 1, sd) / sqrt(n_anios_zonas)
+  t_par <- media_par / ee_par
+  m_nulas_par <- D_par %*% signos_anuales / n_anios_zonas
+  ee_nulas_par <- sqrt((rowMeans(D_par^2) - m_nulas_par^2) / (n_anios_zonas - 1))
+  t_nulos_par <- abs(m_nulas_par / ee_nulas_par)
+  t_max_nulos_par <- apply(t_nulos_par, 2, max)
+  pico_par <- which.max(abs(t_par))
+  c_05_par <- unname(quantile(t_max_nulos_par, 1 - alfa_comparacion))
+  c_adj_par <- unname(quantile(t_max_nulos_par, 1 - alfa_comparacion / n_pares_zonas))
+
+  anova_pares <- rbind(anova_pares, data.frame(
+    zona_A = par_z[1], zona_B = par_z[2],
+    contraste = paste(par_z[1], "-", par_z[2]),
+    pico_pentada = pentadas_eda[pico_par],
+    diferencia_mm = media_par[pico_par],
+    EE_mm = ee_par[pico_par],
+    t_max = unname(abs(t_par[pico_par])),
+    c_max_05 = c_05_par,
+    c_max_adj = c_adj_par,
+    p_global = p_maximo(t_max_nulos_par, abs(t_par[pico_par]))
+  ))
+  curvas_pares[[i]] <- list(contraste = paste(par_z[1], "-", par_z[2]),
+                            media = media_par, t = t_par, c_adj = c_adj_par)
+}
+anova_pares$p_Holm <- p.adjust(anova_pares$p_global, method = "holm")
+anova_pares <- anova_pares[order(anova_pares$p_global), ]
+anova_pares
+guardar_tabla(anova_pares, "06_comparacion_ANOVA_pares.csv")
+
+for (i in seq_len(n_pares_zonas)) {
+  cp <- curvas_pares[[i]]
+  iv <- intervalos_pentadas(abs(cp$t) > cp$c_adj)
+  if (nrow(iv) == 0) next
+  iv$contraste <- cp$contraste
+  for (k in seq_len(nrow(iv))) {
+    idx <- which(pentadas_eda >= iv$inicio_pentada[k] & pentadas_eda <= iv$fin_pentada[k])
+    j <- idx[which.max(abs(cp$t[idx]))]
+    iv$dif_min_mm[k] <- min(cp$media[idx])
+    iv$dif_max_mm[k] <- max(cp$media[idx])
+    iv$pico_pentada[k] <- pentadas_eda[j]
+    iv$pico_t[k] <- cp$t[j]
+  }
+  intervalos_pares <- rbind(intervalos_pares, iv[, c("contraste", "inicio_pentada", "fin_pentada",
+                                                     "puntos", "dif_min_mm", "dif_max_mm",
+                                                     "pico_pentada", "pico_t")])
+}
+intervalos_pares
+guardar_tabla(intervalos_pares, "06_comparacion_ANOVA_pares_intervalos.csv")
+
+matriz_p_zonas <- matrix(NA, n_zonas, n_zonas, dimnames = list(zonas, zonas))
+for (r in seq_len(nrow(anova_pares))) {
+  matriz_p_zonas[anova_pares$zona_A[r], anova_pares$zona_B[r]] <- anova_pares$p_Holm[r]
+  matriz_p_zonas[anova_pares$zona_B[r], anova_pares$zona_A[r]] <- anova_pares$p_Holm[r]
+}
+datos_p_zonas <- as.data.frame(as.table(matriz_p_zonas)) %>%
+  filter(!is.na(Freq)) %>%
+  mutate(Decision = ifelse(Freq < alfa_comparacion, "p < 0.05", "p >= 0.05"))
+png("Figuras/06_comparacion_ANOVA_pares_Holm.png", width = 6.5, height = 5.5, units = "in", res = 150)
+print(
+  ggplot(datos_p_zonas, aes(Var1, Var2, fill = Decision)) +
+    geom_tile(colour = "white") +
+    geom_text(aes(label = sprintf("%.4f", Freq)), size = 3.5) +
+    scale_fill_manual(values = c("p < 0.05" = "cyan", "p >= 0.05" = "grey85"), name = "Holm") +
+    labs(x = "", y = "", title = "Valores p ajustados por Holm (prueba t pareada por año)") +
+    theme_minimal()
+)
+dev.off()
+# Los tres pares muestran diferencias significativas tras el ajuste de Holm (p = 0,0006)
+# Aunque Costa concentra la mayor brecha en mm, Montaña frente a Valle alcanza el mayor |t| (10,70) por su baja varianza interanual
+
+
+##### ANOVA funcional por fase ENSO #####
+# Fase ENSO mensual (criterio NOAA en enso_evaluacion) asignada a las 72 péntadas (6 por mes)
+fases_enso <- c("El Niño", "Neutral", "La Niña")
+colores_enso <- c("El Niño" = "firebrick", Neutral = "grey40", "La Niña" = "steelblue")
+idx_72 <- match(tiempos, pentadas_eda)
+D_red_enso <- D_red[idx_72, , drop = FALSE]
+colnames(D_red_enso) <- as.character(anios_red)
+mes_pentada <- ceiling(tiempos / 6)
+
+fase_mes_enso <- matrix(NA_character_, nrow = 12, ncol = n_red,
+                        dimnames = list(1:12, as.character(anios_red)))
+for (r in seq_len(nrow(enso_evaluacion))) {
+  anio_col <- as.character(enso_evaluacion$YEAR[r])
+  if (anio_col %in% colnames(fase_mes_enso)) {
+    fase_mes_enso[enso_evaluacion$mes_central[r], anio_col] <- enso_evaluacion$fase_enso[r]
+  }
+}
+fase_pentada_enso <- fase_mes_enso[mes_pentada, , drop = FALSE]
+stopifnot(!anyNA(fase_pentada_enso))
+
+# Cobertura de años por fase en cada mes
+cobertura_enso_mes <- data.frame(
+  mes = 1:12,
+  sapply(fases_enso, function(f) rowSums(fase_mes_enso == f)),
+  check.names = FALSE
+)
+stopifnot(all(as.matrix(cobertura_enso_mes[, fases_enso]) >= 2))
+cobertura_enso_mes
+guardar_tabla(cobertura_enso_mes, "06_comparacion_ENSO_cobertura.csv")
+# Cada mes reúne entre 4 y 7 años en El Niño y en La Niña, y entre 9 y 15 en Neutral
+# La asignación mensual conserva las transiciones dentro del año en 18 de los 23 años
+
+# Revisión de medias y dispersión por fase ENSO en las 72 péntadas
+medias_enso <- sapply(fases_enso, function(f) {
+  rowSums(D_red_enso * (fase_pentada_enso == f)) / rowSums(fase_pentada_enso == f)
+})
+media_global_enso <- rowMeans(D_red_enso)
+de_enso <- sapply(fases_enso, function(f) {
+  sapply(seq_along(tiempos), function(i) sd(D_red_enso[i, fase_pentada_enso[i, ] == f]))
+})
+dispersion_enso <- data.frame(
+  fase = fases_enso,
+  anios_mes_min = sapply(fases_enso, function(f) min(cobertura_enso_mes[[f]])),
+  anios_mes_max = sapply(fases_enso, function(f) max(cobertura_enso_mes[[f]])),
+  media_anual_mm = colMeans(medias_enso),
+  DE_min_mm = apply(de_enso, 2, min),
+  DE_max_mm = apply(de_enso, 2, max),
+  pentada_max_DE = tiempos[apply(de_enso, 2, which.max)],
+  DE_media_mm = colMeans(de_enso)
+)
+dispersion_enso
+guardar_tabla(dispersion_enso, "06_comparacion_ENSO_dispersion.csv")
+
+png("Figuras/06_comparacion_ENSO_medias_DE.png", width = 11, height = 4.5, units = "in", res = 150)
+par(mfrow = c(1, 2))
+matplot(tiempos, medias_enso, type = "l", lty = 1, lwd = 2, col = colores_enso,
+        ylim = range(medias_enso, media_global_enso) + c(0, 6),
+        xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Medias funcionales por fase ENSO")
+lines(tiempos, media_global_enso, lwd = 2, lty = 2)
+legend("top", c(fases_enso, "Global"), col = c(colores_enso, "black"), lty = c(rep(1, length(fases_enso)), 2),
+       lwd = 2, bty = "n", ncol = 4, cex = 0.75)
+matplot(tiempos, de_enso, type = "l", lty = 1, lwd = 2, col = colores_enso,
+        ylim = c(0, max(de_enso) * 1.25),
+        xlab = "Péntada", ylab = "Desviación estándar (mm)", main = "Desviación estándar funcional por fase ENSO")
+legend("top", fases_enso, col = colores_enso, lwd = 2, bty = "n", ncol = 3, cex = 0.75)
+dev.off()
+# El sesgo medio pasa de -5,09 mm en El Niño a -1,60 mm en Neutral y +1,87 mm en La Niña
+# Las DE medias son comparables (3,85 a 5,51 mm), pero varían a lo largo del año con grupos pequeños (4 a 7 años)
+
+# ANOVA funcional por fase ENSO con permutación de años completos
+anova_fase_enso <- function(Y, Fmat) {
+  med_glob <- rowMeans(Y)
+  SST <- rowSums((Y - med_glob)^2)
+  SSR <- numeric(nrow(Y))
+  for (f in fases_enso) {
+    ind <- Fmat == f
+    nf <- rowSums(ind)
+    mf <- rowSums(Y * ind) / nf
+    SSR <- SSR + nf * (mf - med_glob)^2
+  }
+  SSE <- SST - SSR
+  F_t <- (SSR / (length(fases_enso) - 1)) / (SSE / (ncol(Y) - length(fases_enso)))
+  list(SSR = SSR, SSE = SSE, SST = SST, F_t = F_t)
+}
+
+obs_enso <- anova_fase_enso(D_red_enso, fase_pentada_enso)
+gl_enso <- length(fases_enso) - 1
+gl_error_enso <- n_red - length(fases_enso)
+F_aov_enso <- sapply(seq_along(tiempos), function(i) {
+  summary(aov(D_red_enso[i, ] ~ factor(fase_pentada_enso[i, ])))[[1]][1, "F value"]
+})
+stopifnot(max(abs(obs_enso$SST - (obs_enso$SSR + obs_enso$SSE))) < 1e-10,
+          max(abs(obs_enso$F_t - F_aov_enso)) < 1e-10)
+
+w_72 <- rep(1, length(tiempos))
+w_72[c(1, length(tiempos))] <- 0.5
+F_obs_enso <- obs_enso$F_t
+F_n_enso <- (sum(w_72 * obs_enso$SSR) / gl_enso) / (sum(w_72 * obs_enso$SSE) / gl_error_enso)
+GPF_enso <- sum(w_72 * F_obs_enso)
+
+# Permutar años completos conserva la autocorrelación anual de cada curva y la cobertura mensual de fases
+set.seed(2026)
+perms_enso <- replicate(B_comparacion, sample(n_red))
+F_t_nulos_enso <- matrix(NA_real_, length(tiempos), B_comparacion)
+F_n_nulos_enso <- numeric(B_comparacion)
+GPF_nulos_enso <- numeric(B_comparacion)
+for (b in seq_len(B_comparacion)) {
+  rb <- anova_fase_enso(D_red_enso[, perms_enso[, b]], fase_pentada_enso)
+  F_t_nulos_enso[, b] <- rb$F_t
+  F_n_nulos_enso[b] <- (sum(w_72 * rb$SSR) / gl_enso) / (sum(w_72 * rb$SSE) / gl_error_enso)
+  GPF_nulos_enso[b] <- sum(w_72 * rb$F_t)
+}
+F_max_nulos_enso <- apply(F_t_nulos_enso, 2, max)
+c_puntual_enso <- apply(F_t_nulos_enso, 1, quantile, probs = 1 - alfa_comparacion)
+c_maximo_enso <- unname(quantile(F_max_nulos_enso, 1 - alfa_comparacion))
+p_puntual_enso <- (1 + rowSums(F_t_nulos_enso >= F_obs_enso - 1e-12)) / (B_comparacion + 1)
+
+pico_F_enso <- which.max(F_obs_enso)
+anova_enso <- data.frame(
+  anios = n_red, gl_fases = gl_enso, gl_error = gl_error_enso,
+  pentada_max = tiempos[pico_F_enso],
+  F_max = F_obs_enso[pico_F_enso], c_maximo = c_maximo_enso,
+  p_F_max = p_maximo(F_max_nulos_enso, F_obs_enso[pico_F_enso]),
+  F_integrado = F_n_enso, p_F_integrado = p_maximo(F_n_nulos_enso, F_n_enso),
+  GPF = GPF_enso, p_GPF = p_maximo(GPF_nulos_enso, GPF_enso)
+)
+anova_enso
+guardar_tabla(anova_enso, "06_comparacion_ENSO_ANOVA.csv")
+
+anova_enso_por_pentada <- data.frame(
+  pentada = tiempos, mes = mes_pentada, medias_enso,
+  SC_fases = obs_enso$SSR, SC_error = obs_enso$SSE,
+  F = F_obs_enso, c_puntual = c_puntual_enso, c_maximo = c_maximo_enso,
+  p_puntual = p_puntual_enso, significativa = F_obs_enso > c_maximo_enso,
+  check.names = FALSE
+)
+guardar_tabla(anova_enso_por_pentada, "06_comparacion_ENSO_por_pentada.csv")
+
+intervalos_enso <- intervalos_pentadas(F_obs_enso > c_maximo_enso, malla = tiempos)
+for (k in seq_len(nrow(intervalos_enso))) {
+  idx <- which(tiempos >= intervalos_enso$inicio_pentada[k] & tiempos <= intervalos_enso$fin_pentada[k])
+  j <- idx[which.max(F_obs_enso[idx])]
+  intervalos_enso$pico_pentada[k] <- tiempos[j]
+  intervalos_enso$pico_F[k] <- F_obs_enso[j]
+  intervalos_enso$El_Nino_mm[k] <- medias_enso[j, "El Niño"]
+  intervalos_enso$Neutral_mm[k] <- medias_enso[j, "Neutral"]
+  intervalos_enso$La_Nina_mm[k] <- medias_enso[j, "La Niña"]
+}
+intervalos_enso
+guardar_tabla(intervalos_enso, "06_comparacion_ENSO_intervalos.csv")
+
+png("Figuras/06_comparacion_ENSO_permutacion.png", width = 11, height = 4.5, units = "in", res = 150)
+par(mfrow = c(1, 2))
+plot(tiempos, F_obs_enso, type = "l", lwd = 2, col = "red",
+     xlab = "Péntada", ylab = "F(t)",
+     main = "Prueba F puntual por permutación (ENSO)",
+     ylim = c(0, max(F_obs_enso, c_maximo_enso) * 1.45))
+lines(tiempos, c_puntual_enso, col = "blue", lty = 3, lwd = 2)
+abline(h = c_maximo_enso, col = "black", lty = 2)
+legend("topleft", c("Estadístico observado", "Valor crítico puntual (0.05)", "Valor crítico máximo"),
+       col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
+hist(F_n_nulos_enso, breaks = 50, freq = FALSE, col = "grey85", border = "white",
+     xlim = c(0, max(F_n_nulos_enso, F_n_enso) * 1.35),
+     xlab = expression(F[n]), main = "Distribución por permutación de F (ENSO)")
+abline(v = F_n_enso, col = "red", lwd = 2)
+legend("topright", c("F observado"), col = "red", lwd = 2, bty = "n", cex = 0.8)
+dev.off()
+# Las tres pruebas globales rechazan H0: F_n = 2,99 (p = 0,0002), GPF = 239,48 (p = 0,0008) y F_max = 10,16 (p = 0,0190)
+# F_n y GPF muestran señal más fuerte que F_max porque el corrimiento entre fases se sostiene durante casi todo el año
+
+# Comparaciones por pares entre fases ENSO tras rechazar H0, con ajuste de Holm
+pares_enso <- combn(fases_enso, 2, simplify = FALSE)
+n_pares_enso <- length(pares_enso)
+anova_pares_enso <- data.frame()
+intervalos_pares_enso <- data.frame()
+curvas_pares_enso <- vector("list", n_pares_enso)
+
+par_fase_enso <- function(Y, Fmat, f1, f2, SSE_glob) {
+  ind1 <- Fmat == f1
+  ind2 <- Fmat == f2
+  n1 <- rowSums(ind1)
+  n2 <- rowSums(ind2)
+  m1 <- rowSums(Y * ind1) / n1
+  m2 <- rowSums(Y * ind2) / n2
+  v1 <- rowSums(((Y - m1) * ind1)^2) / (n1 - 1)
+  v2 <- rowSums(((Y - m2) * ind2)^2) / (n2 - 1)
+  sp2 <- ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)
+  t_comb <- (m1 - m2) / sqrt(sp2 * (1 / n1 + 1 / n2))
+  SSR_par <- (n1 * n2 / (n1 + n2)) * (m1 - m2)^2
+  F_par <- sum(w_72 * SSR_par) / (sum(w_72 * SSE_glob) / gl_error_enso)
+  list(dif = m1 - m2, t_comb = t_comb, F_par = F_par)
+}
+
+SSE_nulos_enso <- matrix(NA_real_, length(tiempos), B_comparacion)
+for (b in seq_len(B_comparacion)) {
+  SSE_nulos_enso[, b] <- anova_fase_enso(D_red_enso[, perms_enso[, b]], fase_pentada_enso)$SSE
+}
+
+for (i in seq_len(n_pares_enso)) {
+  pf <- pares_enso[[i]]
+  obs_par <- par_fase_enso(D_red_enso, fase_pentada_enso, pf[1], pf[2], obs_enso$SSE)
+  F_par_nulos <- numeric(B_comparacion)
+  t_max_par_nulos <- numeric(B_comparacion)
+  for (b in seq_len(B_comparacion)) {
+    p_b <- par_fase_enso(D_red_enso[, perms_enso[, b]], fase_pentada_enso, pf[1], pf[2], SSE_nulos_enso[, b])
+    F_par_nulos[b] <- p_b$F_par
+    t_max_par_nulos[b] <- max(abs(p_b$t_comb))
+  }
+  pico_par <- which.max(abs(obs_par$t_comb))
+  c_adj_par <- unname(quantile(t_max_par_nulos, 1 - alfa_comparacion / n_pares_enso))
+  anova_pares_enso <- rbind(anova_pares_enso, data.frame(
+    fase_A = pf[1], fase_B = pf[2],
+    contraste = paste(pf[1], "-", pf[2]),
+    dif_media_mm = mean(obs_par$dif),
+    pico_pentada = tiempos[pico_par],
+    dif_pico_mm = obs_par$dif[pico_par],
+    t_max = abs(obs_par$t_comb[pico_par]),
+    c_max_adj = c_adj_par,
+    p_t_max = p_maximo(t_max_par_nulos, abs(obs_par$t_comb[pico_par])),
+    F_integrado = obs_par$F_par,
+    p_F_integrado = p_maximo(F_par_nulos, obs_par$F_par)
+  ))
+  curvas_pares_enso[[i]] <- list(contraste = paste(pf[1], "-", pf[2]),
+                                 dif = obs_par$dif, t_comb = obs_par$t_comb, c_adj = c_adj_par)
+}
+anova_pares_enso$p_Holm_F <- p.adjust(anova_pares_enso$p_F_integrado, method = "holm")
+anova_pares_enso$p_Holm_t <- p.adjust(anova_pares_enso$p_t_max, method = "holm")
+anova_pares_enso <- anova_pares_enso[order(anova_pares_enso$p_F_integrado), ]
+anova_pares_enso
+guardar_tabla(anova_pares_enso, "06_comparacion_ENSO_pares.csv")
+
+for (i in seq_len(n_pares_enso)) {
+  cp <- curvas_pares_enso[[i]]
+  iv <- intervalos_pentadas(abs(cp$t_comb) > cp$c_adj, malla = tiempos)
+  if (nrow(iv) == 0) next
+  iv$contraste <- cp$contraste
+  for (k in seq_len(nrow(iv))) {
+    idx <- which(tiempos >= iv$inicio_pentada[k] & tiempos <= iv$fin_pentada[k])
+    j <- idx[which.max(abs(cp$t_comb[idx]))]
+    iv$dif_min_mm[k] <- min(cp$dif[idx])
+    iv$dif_max_mm[k] <- max(cp$dif[idx])
+    iv$pico_pentada[k] <- tiempos[j]
+    iv$pico_t[k] <- cp$t_comb[j]
+  }
+  intervalos_pares_enso <- rbind(intervalos_pares_enso, iv[, c("contraste", "inicio_pentada", "fin_pentada",
+                                                               "puntos", "dif_min_mm", "dif_max_mm",
+                                                               "pico_pentada", "pico_t")])
+}
+intervalos_pares_enso
+guardar_tabla(intervalos_pares_enso, "06_comparacion_ENSO_pares_intervalos.csv")
+
+matriz_p_enso <- matrix(NA, length(fases_enso), length(fases_enso), dimnames = list(fases_enso, fases_enso))
+for (r in seq_len(nrow(anova_pares_enso))) {
+  matriz_p_enso[anova_pares_enso$fase_A[r], anova_pares_enso$fase_B[r]] <- anova_pares_enso$p_Holm_F[r]
+  matriz_p_enso[anova_pares_enso$fase_B[r], anova_pares_enso$fase_A[r]] <- anova_pares_enso$p_Holm_F[r]
+}
+datos_p_enso <- as.data.frame(as.table(matriz_p_enso)) %>%
+  filter(!is.na(Freq)) %>%
+  mutate(Decision = ifelse(Freq < alfa_comparacion, "p < 0.05", "p >= 0.05"))
+png("Figuras/06_comparacion_ENSO_pares_Holm.png", width = 6.5, height = 5.5, units = "in", res = 150)
+print(
+  ggplot(datos_p_enso, aes(Var1, Var2, fill = Decision)) +
+    geom_tile(colour = "white") +
+    geom_text(aes(label = sprintf("%.4f", Freq)), size = 3.5) +
+    scale_fill_manual(values = c("p < 0.05" = "cyan", "p >= 0.05" = "grey85"), name = "Holm") +
+    labs(x = "", y = "", title = "Valores p ajustados por Holm (prueba F por permutación)") +
+    theme_minimal()
+)
+dev.off()
+# Tras ajustar por Holm en F integrado, difieren El Niño - La Niña (p = 0,0006) y El Niño - Neutral (p = 0,0392)
+# Neutral - La Niña no alcanza significancia al 5 % (p = 0,1100)
+
+# Comprobación por fuente separada: respuesta de estaciones y satélite a las fases ENSO
+E_red_enso <- sapply(anios_red, function(anio) {
+  rowMeans(valores_eda$terrestre[idx_72, metadatos_eda$YEAR == anio, drop = FALSE])
+})
+S_red_enso <- sapply(anios_red, function(anio) {
+  rowMeans(valores_eda$satelital[idx_72, metadatos_eda$YEAR == anio, drop = FALSE])
+})
+fuentes_enso_lista <- list(Estaciones = E_red_enso, Satélite = S_red_enso)
+medias_fuentes_enso <- list()
+anova_fuentes_enso <- data.frame()
+
+for (nom_f in names(fuentes_enso_lista)) {
+  Y_f <- fuentes_enso_lista[[nom_f]]
+  obs_f <- anova_fase_enso(Y_f, fase_pentada_enso)
+  F_n_f <- (sum(w_72 * obs_f$SSR) / gl_enso) / (sum(w_72 * obs_f$SSE) / gl_error_enso)
+  F_max_f <- max(obs_f$F_t)
+  F_n_nul_f <- numeric(B_comparacion)
+  F_max_nul_f <- numeric(B_comparacion)
+  for (b in seq_len(B_comparacion)) {
+    rb <- anova_fase_enso(Y_f[, perms_enso[, b]], fase_pentada_enso)
+    F_n_nul_f[b] <- (sum(w_72 * rb$SSR) / gl_enso) / (sum(w_72 * rb$SSE) / gl_error_enso)
+    F_max_nul_f[b] <- max(rb$F_t)
+  }
+  meds_f <- sapply(fases_enso, function(f) {
+    rowSums(Y_f * (fase_pentada_enso == f)) / rowSums(fase_pentada_enso == f)
+  })
+  medias_fuentes_enso[[nom_f]] <- meds_f
+  anova_fuentes_enso <- rbind(anova_fuentes_enso, data.frame(
+    fuente = nom_f,
+    media_El_Nino_mm = mean(meds_f[, "El Niño"]),
+    media_Neutral_mm = mean(meds_f[, "Neutral"]),
+    media_La_Nina_mm = mean(meds_f[, "La Niña"]),
+    F_max = F_max_f, p_F_max = p_maximo(F_max_nul_f, F_max_f),
+    F_integrado = F_n_f, p_F_integrado = p_maximo(F_n_nul_f, F_n_f)
+  ))
+}
+anova_fuentes_enso
+guardar_tabla(anova_fuentes_enso, "06_comparacion_ENSO_fuentes.csv")
+
+limites_fuentes_enso <- range(unlist(medias_fuentes_enso)) + c(0, 8)
+png("Figuras/06_comparacion_ENSO_fuentes.png", width = 11, height = 4.5, units = "in", res = 150)
+par(mfrow = c(1, 2))
+for (nom_f in names(fuentes_enso_lista)) {
+  matplot(tiempos, medias_fuentes_enso[[nom_f]], type = "l", lty = 1, lwd = 2, col = colores_enso,
+          ylim = limites_fuentes_enso, xlab = "Péntada", ylab = "Precipitación media (mm)",
+          main = paste("Medias por fase ENSO -", nom_f))
+  lines(tiempos, rowMeans(fuentes_enso_lista[[nom_f]]), lwd = 2, lty = 2)
+  legend("top", c(fases_enso, "Global"), col = c(colores_enso, "black"),
+         lty = c(rep(1, length(fases_enso)), 2), lwd = 2, bty = "n", ncol = 4, cex = 0.75)
+}
+dev.off()
+# En estaciones la lluvia media varía con ENSO (20,09 mm en El Niño; 23,65 en Neutral; 26,35 en La Niña; p = 0,0002)
+# En satélite las tres curvas casi coinciden alrededor de 25 mm (p = 0,3975), por lo que sobrestima en El Niño y subestima en La Niña
 
 
 #################### Regresion funcional ####################
