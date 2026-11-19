@@ -386,6 +386,7 @@ def cargar_datos_red(carpeta='Curvas', escala='raiz'):
             'cov': meta[['altitud_completa', 'oni_promedio']].to_numpy(dtype=np.float64),
             'c_sat': coeficientes_en_escala(coeficientes('coeficientes_satelite.csv'), phi_sat, escala),
             'c_est': coeficientes_en_escala(coeficientes('coeficientes_estaciones.csv'), phi_est, escala),
+            'est_mm': np.maximum(coeficientes('coeficientes_estaciones.csv') @ phi_est.T, 0),
             't': t, 'filas_pentadas': filas, 'phi_sat': phi_sat, 'phi_est': phi_est}
 
 # MLP con el número de neuronas ocultas que deja sus parámetros más cerca de los de la KAN
@@ -428,10 +429,19 @@ class PerdidaFuncional(nn.Module):
     def forward(self, puntajes, c, codificador):
         return self.error_l2(puntajes, c) + self.lam * codificador.penalizacion_rugosidad()
 
+# RECM (en las péntadas) y L2 relativo en mm frente a la curva suavizada de la estación
+def metricas_mm(c_hat, filas, datos, escala):
+    pred, _ = reconstruir_mm(c_hat, datos['phi_est'], escala)
+    ref, t, p = datos['est_mm'][filas], datos['t'], datos['filas_pentadas']
+    recm = np.sqrt(np.mean((pred[:, p] - ref[:, p])**2))
+    l2 = np.mean(np.sqrt(np.trapezoid((pred - ref)**2, t, axis=1) / np.trapezoid(ref**2, t, axis=1)))
+    return recm, l2
+
 # Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L2 de validación
 # La validación se evalúa en cada época; se guarda el estado con menor pérdida de validación
+# Con con_metricas=True también se guardan por época la RECM y el L2 relativo de entrenamiento y validación
 def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e, fpca, mu_c, psi_c, cov_norm,
-                 epocas=EPOCAS_MAXIMAS, paciencia=PACIENCIA):
+                 epocas=EPOCAS_MAXIMAS, paciencia=PACIENCIA, con_metricas=False, escala=ESCALA):
     T = lambda x: torch.as_tensor(x, dtype=torch.float64)
     tr, va = datos['particion'] == 'entrenamiento', datos['particion'] == 'validacion'
     c_tr, h_tr, y_tr = T(datos['c_sat'][tr]), T(cov_norm[tr]), T(datos['c_est'][tr])
@@ -450,7 +460,14 @@ def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e,
         valor.backward(); optimizador.step()
         modelo.eval()
         with torch.no_grad(): validacion = perdida.error_l2(modelo(c_va, h_va), y_va).item()
-        historia.append((epoca, valor.item(), validacion))
+        fila = [epoca, valor.item(), validacion]
+        if con_metricas:
+            with torch.no_grad():
+                salida_tr = modelo(c_tr, h_tr)
+                fila.append(perdida.error_l2(salida_tr, y_tr).item())
+                fila += metricas_mm(perdida.coeficientes(salida_tr).numpy(), tr, datos, escala)
+                fila += metricas_mm(perdida.coeficientes(modelo(c_va, h_va)).numpy(), va, datos, escala)
+        historia.append(tuple(fila))
         if validacion < mejor - 1e-10:
             mejor, mejor_epoca, sin_mejora = validacion, epoca, 0
             mejor_estado = {k: v.detach().clone() for k, v in modelo.state_dict().items()}
@@ -593,6 +610,58 @@ def grafica_sedimentacion(explicada, m_elegido, archivo):
     ax.legend(loc='center right', fontsize=8)
     fig.tight_layout(); fig.savefig(archivo, dpi=150); plt.close(fig)
 
+
+# Historial por época de la configuración elegida de cada cabeza (mismas semillas, mismos modelos)
+COLUMNAS_HISTORIAL = ['epoca', 'perdida_entrenamiento', 'L2_validacion', 'L2_entrenamiento',
+                      'RECM_entrenamiento', 'L2_relativo_entrenamiento', 'RECM_validacion', 'L2_relativo_validacion']
+
+def historial_entrenamiento(escala=ESCALA, carpeta='Curvas', semillas=SEMILLAS, prefijo='08_red'):
+    datos = cargar_datos_red(carpeta, escala)
+    gram_s, rugosidad_s = matrices_integracion(datos['t'], datos['phi_sat'])
+    gram_e, _ = matrices_integracion(datos['t'], datos['phi_est'])
+    cov_norm = NormalizadorCovariables().ajustar(datos['cov'], datos['particion']).transformar(datos['cov'])
+    elegidas = pd.read_csv(f'Tablas/{prefijo}_configuracion_elegida.csv').set_index('cabeza')
+    filas = []
+    for cabeza in ('lineal', 'MLP', 'KAN'):
+        q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), float(elegidas.loc[cabeza, 'lambda'])
+        fpca, mu_c, psi_c, _ = preparar_fpca(datos, m)
+        for semilla in semillas:
+            _, _, resumen, historia = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e,
+                                                   fpca, mu_c, psi_c, cov_norm, con_metricas=True, escala=escala)
+            for h in historia:
+                filas.append({'cabeza': cabeza, 'semilla': semilla, **dict(zip(COLUMNAS_HISTORIAL, h)),
+                              'mejor_epoca': resumen['mejor_epoca']})
+            print(f'{cabeza} semilla={semilla:04d}: mejor época {resumen["mejor_epoca"]}, '
+                  f'validación={resumen["perdida_validacion"]:.4f}', flush=True)
+    tabla = pd.DataFrame(filas)
+    tabla.to_csv(f'Tablas/{prefijo}_historial_entrenamiento.csv', index=False)
+    return tabla
+
+# Pérdida y métricas por época: una fila por cabeza, entrenamiento en azul y validación en naranja
+# Cada curva llega hasta la época que se guarda (menor pérdida de validación)
+# Eje y en escala log porque las primeras épocas tienen errores muy grandes
+def grafica_historial(tabla, archivo):
+    import matplotlib.pyplot as plt
+    paneles = [('Pérdida L2 (escala raíz)', 'L2_entrenamiento', 'L2_validacion'),
+               ('RECM (mm)', 'RECM_entrenamiento', 'RECM_validacion'),
+               ('L2 relativo', 'L2_relativo_entrenamiento', 'L2_relativo_validacion')]
+    cabezas = ('lineal', 'MLP', 'KAN')
+    fig, ejes = plt.subplots(len(cabezas), len(paneles), figsize=(14, 10), sharex='row')
+    for i, cabeza in enumerate(cabezas):
+        sub = tabla[tabla.cabeza == cabeza]
+        for j, (titulo, col_tr, col_va) in enumerate(paneles):
+            ax = ejes[i, j]
+            for k, (semilla, g) in enumerate(sub.groupby('semilla')):
+                g = g[g.epoca <= g.mejor_epoca]
+                ax.plot(g.epoca, g[col_tr], color='#1f77b4', lw=1, alpha=0.8, label='Entrenamiento' if k == 0 else None)
+                ax.plot(g.epoca, g[col_va], color='#ff7f0e', lw=1, alpha=0.8, label='Validación' if k == 0 else None)
+            ax.set_yscale('log')
+            ax.set_title(f'{cabeza}: {titulo}', fontsize=10)
+            if i == len(cabezas) - 1: ax.set_xlabel('Época')
+            if i == 0 and j == 0: ax.legend(fontsize=8)
+    fig.suptitle('Entrenamiento de la red hasta la época guardada (configuración elegida, 3 semillas)')
+    fig.tight_layout(); fig.savefig(archivo, dpi=150); plt.close(fig)
+    return archivo
 
 # Ejecución: entrenamiento de las tres cabezas y selección con validación
 def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, componentes=COMPONENTES_RED,

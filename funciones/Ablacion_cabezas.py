@@ -138,6 +138,101 @@ def grafica_intervalos(comparacion):
     return fig
 
 
+# Curvas de validación en las 72 péntadas: promedio de las 3 semillas de cada cabeza, satélite y climatología
+def curvas_pentadas(D, pred):
+    curvas = {m: np.mean([c[:, D['filas']] for (mm, s), c in pred.items() if mm == m], axis=0) for m in (*CABEZAS, SATELITE)}
+    curvas['Climatología'] = np.tile(D['climatologia'], (D['va'].sum(), 1))
+    return curvas
+
+
+# ¿La red aprende algo más que la climatología de entrenamiento mu(t)?
+# - mejora_%: reducción del error cuadrático frente a predecir mu(t) para todas las curvas
+# - curvas_mejores_%: curvas con menor RECM que mu(t)
+# - corr_anomalias: correlación entre (predicho - mu) y (estación - mu); 0 = solo devuelve la media
+# - razon_desv_anomalias: desviación de las anomalías predichas / observadas; < 1 = encogidas hacia la media
+# - corr_acumulado: correlación entre acumulados anuales predichos y de la estación (años húmedos frente a secos)
+def aprendizaje_media(D, pred):
+    ref, clim = D['referencia'], D['climatologia']
+    curvas = curvas_pentadas(D, pred)
+    recm_clim = np.sqrt(np.mean((curvas['Climatología'] - ref)**2, 1))
+    anom_obs = ref - clim
+    filas = []
+    for modelo, p in curvas.items():
+        recm = np.sqrt(np.mean((p - ref)**2, 1))
+        fila = {'modelo': modelo, 'RECM_mm': np.sqrt(np.mean((p - ref)**2)),
+                'mejora_%': 100 * (1 - np.mean((p - ref)**2) / np.mean((curvas['Climatología'] - ref)**2)),
+                'curvas_mejores_%': 100 * np.mean(recm < recm_clim)}
+        if modelo != 'Climatología':
+            anom = p - clim
+            fila.update(corr_anomalias=np.corrcoef(anom.ravel(), anom_obs.ravel())[0, 1],
+                        razon_desv_anomalias=anom.std() / anom_obs.std(),
+                        corr_acumulado=np.corrcoef(p.sum(1), ref.sum(1))[0, 1])
+        filas.append(fila)
+    return pd.DataFrame(filas).set_index('modelo')
+
+
+# Correlación, en cada péntada, entre anomalías predichas y observadas a través de las curvas de validación
+def grafica_anomalias(D, pred):
+    ref, clim = D['referencia'], D['climatologia']
+    curvas = curvas_pentadas(D, pred)
+    t = np.arange(1, 73)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+    for modelo in (*CABEZAS, SATELITE):
+        a, o = curvas[modelo] - clim, ref - clim
+        r = [np.corrcoef(a[:, j], o[:, j])[0, 1] for j in range(72)]
+        axes[0].plot(t, r, c=COLORES[modelo], label=modelo)
+    axes[0].axhline(0, c='k', lw=.5)
+    axes[0].set(title='Correlación de anomalías respecto a la climatología', xlabel='Péntada', ylabel='r'); axes[0].legend(frameon=False)
+    p, o = curvas['KAN'].sum(1), ref.sum(1)
+    axes[1].plot(o, p, '.', c=COLORES['KAN'], ms=4, alpha=.6, label='KAN')
+    axes[1].plot(o, curvas[SATELITE].sum(1), '.', c=COLORES[SATELITE], ms=4, alpha=.4, label=SATELITE)
+    axes[1].axhline(curvas['Climatología'][0].sum(), c='k', ls='--', lw=1, label='Climatología')
+    lim = [min(o.min(), p.min()), max(o.max(), p.max())]; axes[1].plot(lim, lim, 'k:', lw=.8)
+    axes[1].set(title='Acumulado anual en validación', xlabel='Estación (mm)', ylabel='Predicho (mm)'); axes[1].legend(frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+# Desfase: rezago (en péntadas) con la mayor correlación entre la curva predicha y la de la estación;
+# rezago > 0 = la predicción va adelantada. También el sesgo con signo en la fecha de cada pico
+# (> 0 = el pico predicho llega tarde) en la malla fina
+REZAGOS = range(-6, 7)
+
+def _mejor_rezago(p, r):
+    cor = [np.corrcoef(p[max(0, -l):72 - max(0, l)], r[max(0, l):72 - max(0, -l)])[0, 1] for l in REZAGOS]
+    return list(REZAGOS)[int(np.nanargmax(cor))]
+
+def rezagos(D, pred):
+    ref, t = D['referencia'], D['t_fina']
+    curvas = curvas_pentadas(D, pred)
+    finas = {m: np.mean([c for (mm, s), c in pred.items() if mm == m], axis=0) for m in (*CABEZAS, SATELITE)}
+    finas['Climatología'] = np.tile(D['climatologia_fina'], (D['va'].sum(), 1))
+    filas, por_curva = [], {}
+    for modelo, p in curvas.items():
+        lag = np.array([_mejor_rezago(a, b) for a, b in zip(p, ref)])
+        por_curva[modelo] = lag
+        fila = {'modelo': modelo, 'rezago_mediano': np.median(lag), 'rezago_medio': lag.mean(),
+                'curvas_rezago_0_%': 100 * np.mean(lag == 0), 'curvas_rezago_hasta_1_%': 100 * np.mean(np.abs(lag) <= 1),
+                'rezago_curva_media': _mejor_rezago(p.mean(0), ref.mean(0))}
+        for j, (a, b) in enumerate(Aa.TEMPORADAS, 1):
+            v = (t >= a) & (t <= b)
+            d = t[v][finas[modelo][:, v].argmax(1)] - t[v][D['estacion_mm'][:, v].argmax(1)]
+            fila[f'pico{j}_sesgo_pentadas'] = d.mean(); fila[f'pico{j}_pentadas'] = np.abs(d).mean()
+        filas.append(fila)
+    return pd.DataFrame(filas).set_index('modelo'), por_curva
+
+
+def grafica_rezagos(por_curva):
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    for modelo in (*CABEZAS, SATELITE):
+        valores, n = np.unique(por_curva[modelo], return_counts=True)
+        ax.plot(valores, 100 * n / n.sum(), 'o-', c=COLORES[modelo], label=modelo)
+    ax.axvline(0, c='0.5', lw=.8, ls='--')
+    ax.set(title='Rezago de máxima correlación con la estación', xlabel='Rezago (péntadas; > 0 = adelantada)', ylabel='% de curvas')
+    ax.legend(frameon=False)
+    return fig
+
+
 def grafica_media(D, pred):
     t = np.arange(1, 73); m_obs = D['referencia'].mean(0)
     fig, axes = plt.subplots(1, 2, figsize=(14, 4))

@@ -79,10 +79,10 @@ def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
         'DEF': estandarizar(np.c_[D['altitud'], tabla.loc[meta.YEAR, 1].to_numpy(float)]),
         'curva': estandarizar(D['altitud'][:, None]),
     }
-    # Predicciones de las regresiones funcionales del script de R
+    # Prediccion de la regresion funcional funcion a funcion del script de R (la referencia de la red)
     reg = pd.read_csv(carpeta_curvas / 'regresion_funcional_predicciones.csv', dtype={'curva': str})
-    D['regresion'] = {m: reg[reg.modelo == m].set_index('curva').loc[D['curvas_va']].drop(columns='modelo').to_numpy(float)
-                      for m in reg.modelo.unique()}
+    reg = reg[reg.modelo == 'Funcion a funcion']
+    D['regresion'] = {'Funcion a funcion': reg.set_index('curva').loc[D['curvas_va']].drop(columns='modelo').to_numpy(float)}
     RESULTADOS.mkdir(exist_ok=True)
     return D
 
@@ -328,83 +328,6 @@ def grafica_media_sesgo(D, predicciones):
     axes[1].plot(t, 100 * (np.nanmean(D['satelite_pent'], 0) / m_obs - 1), c=COLORES['Satélite'], label='Satélite')
     axes[0].set(xlabel='Péntada', ylabel='mm', title='Media en validación'); axes[0].legend(frameon=False)
     axes[1].axhline(0, c='k', lw=.5); axes[1].set(xlabel='Péntada', ylabel='%', title='Sesgo por péntada'); axes[1].legend(frameon=False)
-    return fig
-
-def grafica_casos(D, predicciones, referencia='KAN'):
-    t = np.arange(1, 73)
-    err = np.sqrt(np.trapezoid((predicciones[referencia][1] - D['estacion_mm'])**2, D['t_fina'], axis=1))
-    casos = {'Mejor': np.argmin(err), 'Típica': np.argsort(err)[len(err) // 2], 'Peor': np.argmax(err)}
-    fig, axes = plt.subplots(1, 3, figsize=(15, 3.8))
-    for ax, (nombre, i) in zip(axes, casos.items()):
-        ax.plot(D['t_fina'], D['estacion_mm'][i], 'k', lw=2, label='Estación')
-        ax.plot(D['t_fina'], D['satelite_mm'][i], c=COLORES['Satélite'], label='Satélite')
-        for c, p in predicciones.items(): ax.plot(D['t_fina'], p[1][i], c=COLORES.get(c), label=c)
-        ax.set(title=f'{nombre}: {D["curvas_va"][i]}', xlabel='Péntada', ylabel='mm')
-    axes[0].legend(frameon=False, fontsize=7)
-    return fig
-
-def grafica_pesos_satelite(D, red):
-    w = D['phi_s_f'] @ red.sat.A.detach().numpy().T
-    media = (D['datos']['c_sat'][D['tr']] @ D['phi_s_f'].T).mean(0)
-    q = w.shape[1]; ncol = 4; nfil = int(np.ceil(q / ncol))
-    fig, axes = plt.subplots(nfil, ncol, figsize=(14, 2.6 * nfil), squeeze=False)
-    for k, ax in enumerate(axes.flat):
-        if k >= q: ax.axis('off'); continue
-        ax.fill_between(D['t_fina'], 0, media / media.max() * np.abs(w[:, k]).max(), color='0.85')
-        ax.plot(D['t_fina'], w[:, k], c='tab:red', lw=2); ax.axhline(0, c='k', lw=.5)
-        ax.set_title(f'$w_{{{k+1}}}(t)$', fontsize=10); ax.set_xticks([0, 18, 36, 54, 72])
-    fig.supxlabel('Péntada'); fig.tight_layout()
-    return fig
-
-def grafica_fpca(D, m):
-    fp, _, _ = fpca_estaciones(D, m)
-    fig, ax = plt.subplots(figsize=(7, 3.4))
-    for k in range(m): ax.plot(np.arange(1, 73), fp['base'][k], label=f'$\\psi_{k+1}$')
-    ax.axhline(0, c='k', lw=.5); ax.set(title='Funciones propias de la FPCA (escala raiz de P)', xlabel='Péntada'); ax.legend(frameon=False, fontsize=8)
-    return fig
-
-def nombres_entradas(D, red, oni):
-    nombres = [f'z{k+1}' for k in range(red.sat.A.shape[0])]
-    if red.oni is not None: nombres += [f'oni{k+1}' for k in range(red.oni.A.shape[0])]
-    return nombres + (['altitud', 'ONI'] if D['covariables'][oni].shape[1] == 2 else ['altitud'])
-
-@torch.no_grad()
-def graficas_activaciones_kan(D, red, oni):
-    nombres = nombres_entradas(D, red, oni)
-    h = red.entradas(*argumentos(D, D['tr'], oni))
-    figuras = []
-    for n_capa, capa in enumerate(red.cabeza):
-        fig, axes = plt.subplots(capa.salidas, capa.entradas, figsize=(1.9 * capa.entradas, 1.6 * capa.salidas), squeeze=False)
-        for o in range(capa.salidas):
-            for e in range(capa.entradas):
-                x = torch.linspace(h[:, e].min(), h[:, e].max(), 200, dtype=torch.float64)
-                ax = axes[o, e]; ax.plot(x, capa.arista(o, e, x), lw=1.5); ax.tick_params(labelsize=6)
-                if o == 0: ax.set_title(nombres[e] if n_capa == 0 else f'oculto {e+1}', fontsize=8)
-                if e == 0: ax.set_ylabel(f'salida {o+1}', fontsize=8)
-        fig.suptitle(f'KAN, capa {n_capa + 1}', fontsize=10); fig.tight_layout()
-        figuras.append(fig)
-        h = capa(h)
-    return figuras
-
-# Amplitud de cada arista de la primera capa: rango de phi(x) sobre los datos de entrenamiento
-@torch.no_grad()
-def amplitud_aristas(D, red, oni):
-    h = red.entradas(*argumentos(D, D['tr'], oni)); capa = red.cabeza[0]
-    amp = [[float(np.ptp(capa.arista(o, e, h[:, e]).numpy())) for e in range(capa.entradas)] for o in range(capa.salidas)]
-    return pd.DataFrame(amp, index=[f'oculto {o+1}' for o in range(capa.salidas)], columns=nombres_entradas(D, red, oni)).round(2)
-
-@torch.no_grad()
-def grafica_puntajes(D, red, m, oni):
-    fp, _, sd = fpca_estaciones(D, m)
-    curvas = D['datos']['c_est'] @ D['phi_e'].T
-    real = ((curvas[D['va']] - fp['media']) @ fp['base'].T) / sd
-    pred = red(*argumentos(D, D['va'], oni)).numpy()
-    fig, axes = plt.subplots(1, m, figsize=(3 * m, 3), squeeze=False)
-    for j, ax in enumerate(axes[0]):
-        ax.plot(real[:, j], pred[:, j], '.', ms=2, alpha=.5); lim = np.abs(real[:, j]).max()
-        ax.plot([-lim, lim], [-lim, lim], 'k--', lw=.8)
-        ax.set(title=f'$s_{j+1}$: r = {np.corrcoef(real[:, j], pred[:, j])[0, 1]:.2f}', xlabel='real', ylabel='predicho' if j == 0 else '')
-    fig.tight_layout()
     return fig
 
 def grafica_error_pentada(D, predicciones, referencia='KAN'):

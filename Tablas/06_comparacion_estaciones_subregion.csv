@@ -10,6 +10,7 @@
 "2610000111",-76.47042264,3.170509731,FALSE,NA,NA,"Magdalena Cauca","Cauca",NA
 "2610000113",-76.57956688,3.055881485,FALSE,NA,NA,"Magdalena Cauca","Cauca",NA
 "2610000115",-75.96923743,4.783417255,TRUE,"Planicie aluvial","Plano de desborde","Magdalena Cauca","Cauca","Valle"
+"2610000116",-76.4754449,3.451669895,TRUE,"Cuerpo de agua","Cuerpo de agua","Magdalena Cauca","Cauca",NA
 "2611800102",-76.51217954,3.075837508,FALSE,NA,NA,"Magdalena Cauca","Cauca",NA
 "2612000102",-76.2807499,3.162569171,FALSE,NA,NA,"Magdalena Cauca","Cauca",NA
 "2612000105",-76.19655909,3.063802867,FALSE,NA,NA,"Magdalena Cauca","Cauca",NA
@@ -98,6 +99,7 @@
 "2622110101",-76.65082883,3.327440167,TRUE,"Piedemonte coluvio aluvial","Vallecitos coluvio-aluviales","Magdalena Cauca","Cauca",NA
 "2622110102",-76.59941604,3.356426903,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Magdalena Cauca","Cauca","Montaña"
 "2622310101",-76.57227619,3.357038823,TRUE,"Montaña estructural erosional","Espinazo","Magdalena Cauca","Cauca","Montaña"
+"2622310201",-76.59504237,3.373613371,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Magdalena Cauca","Cauca","Montaña"
 "2622320101",-76.5904977,3.391401808,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Magdalena Cauca","Cauca","Montaña"
 "2622320103",-76.62104186,3.373360336,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Magdalena Cauca","Cauca","Montaña"
 "2622330101",-76.53331758,3.44228234,TRUE,"Zona urbana","Zona urbana","Magdalena Cauca","Cauca",NA
@@ -155,6 +157,7 @@
 "5301500106",-76.80607739,3.856769247,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","Tapaje - Dagua - Directos","Montaña"
 "5301500107",-76.68770663,3.652622386,TRUE,"Zona urbana","Zona urbana","Pacifico","Tapaje - Dagua - Directos",NA
 "5301500108",-76.86325018,3.81381116,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","Tapaje - Dagua - Directos","Montaña"
+"5301500109",-76.6013162,3.602086519,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","Tapaje - Dagua - Directos","Montaña"
 "5420410107",-76.30834605,4.436192993,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","San Juán","Montaña"
 "5420410111",-76.24235082,4.732304668,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","San Juán","Montaña"
 "5420410112",-76.24343675,4.516212758,TRUE,"Montaña ﬂuvio gravitacional","Vallecitos","Pacifico","San Juán","Montaña"
@@ -171,6 +174,3 @@
 "5421200111",-76.69203701,3.935733464,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","San Juán","Montaña"
 "5421200114",-76.49988116,4.038700614,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","San Juán","Montaña"
 "5421210101",-76.55395112,3.969024105,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","San Juán","Montaña"
-"2610000116",-76.4754449,3.451669895,TRUE,"Cuerpo de agua","Cuerpo de agua","Magdalena Cauca","Cauca",NA
-"2622310201",-76.59504237,3.373613371,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Magdalena Cauca","Cauca","Montaña"
-"5301500109",-76.6013162,3.602086519,TRUE,"Montaña ﬂuvio gravitacional","Filas y vigas","Pacifico","Tapaje - Dagua - Directos","Montaña"

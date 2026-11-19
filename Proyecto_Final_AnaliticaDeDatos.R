@@ -20,18 +20,15 @@ set.seed(2026)
 #################### Directorio de trabajo ####################
 rm(list = ls())
 
-
-# Carpetas de salida
+# Carpetas
 dir.create("Tablas", showWarnings = FALSE)
 dir.create("Figuras", showWarnings = FALSE)
 dir.create("Curvas", showWarnings = FALSE)
 
-# Guardar una tabla en la carpeta Tablas
 guardar_tabla <- function(tabla, nombre) {
   write.csv(tabla, file.path("Tablas", nombre), row.names = FALSE, fileEncoding = "UTF-8")
 }
 
-# Guardar la grafica actual en la carpeta Figuras
 guardar_figura <- function(nombre, ancho = 10, alto = 6) {
   dev.copy(png, file.path("Figuras", nombre), width = ancho, height = alto, units = "in", res = 150)
   dev.off()
@@ -47,10 +44,42 @@ p_tierra <- p_tierra[p_tierra$YEAR >= 1981, ]
 p_tierra$fecha <- as.Date(sprintf("%04d-%02d-%02d", p_tierra$YEAR, p_tierra$MONTH, p_tierra$DAY))
 p_tierra <- p_tierra[order(p_tierra$STATION_ID, p_tierra$fecha), ]
 
-# Verificar duplicados estacion-fecha
+# Verificar duplicados
 sum(duplicated(p_tierra[, c("STATION_ID", "fecha")]))
 
-# Registros, estaciones y pares estacion-año en cada paso
+# Dias faltantes por año 
+faltantes_por_anio <- p_tierra %>%
+  group_by(STATION_ID) %>%
+  complete(fecha = seq(min(fecha), max(fecha), by = "day")) %>%
+  ungroup() %>%
+  mutate(YEAR = as.integer(format(fecha, "%Y"))) %>%
+  group_by(YEAR) %>%
+  summarize(total = n(), faltantes = sum(is.na(VALUE)),
+            porcentaje_faltantes = round(100 * mean(is.na(VALUE)), 1))
+faltantes_por_anio
+guardar_tabla(faltantes_por_anio, "01_preprocesamiento_faltantes_por_anio.csv")
+
+# Dias faltantes por año y estacion
+faltantes_por_anio_estacion <- p_tierra %>%
+  group_by(STATION_ID) %>%
+  complete(fecha = seq(min(fecha), max(fecha), by = "day")) %>%
+  ungroup() %>%
+  mutate(YEAR = as.integer(format(fecha, "%Y"))) %>%
+  group_by(STATION_ID, YEAR) %>%
+  summarize(total = n(), faltantes = sum(is.na(VALUE)),
+            porcentaje_faltantes = round(100 * mean(is.na(VALUE)), 1),
+            .groups = "drop")
+guardar_tabla(faltantes_por_anio_estacion, "01_preprocesamiento_faltantes_por_anio_estacion.csv")
+
+# Conteo Faltantes año-estacion
+conteo_por_anio <- faltantes_por_anio_estacion %>%
+  group_by(YEAR) %>%
+  summarize(estaciones_20_o_mas = sum(porcentaje_faltantes >= 20),
+            estaciones_menos_20 = sum(porcentaje_faltantes < 20),
+            .groups = "drop")
+conteo_por_anio
+guardar_tabla(conteo_por_anio, "01_preprocesamiento_conteo_20pct_por_anio.csv")
+
 contar <- function(datos, paso) {
   validos <- datos[!is.na(datos$VALUE), ]
   data.frame(paso = paso, registros = nrow(validos),
@@ -59,14 +88,6 @@ contar <- function(datos, paso) {
 }
 
 trazabilidad_pasos <- contar(p_tierra, "Datos 1981-2003")
-
-
-# Separar datos
-p_prueba <- p_tierra[p_tierra$YEAR >= 2001, ]
-p_tierra <- p_tierra[p_tierra$YEAR <= 2000, ]
-
-trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_tierra, "Sin el conjunto de prueba (1981-2000)"))
-trazabilidad_prueba <- contar(p_prueba, "Datos 2001-2003")
 
 # Coordenadas y altitud de las estaciones
 coord <- read.csv("data/CVC_Wheather_Stations_Long_Lat.csv", fileEncoding = "latin1")
@@ -79,14 +100,14 @@ info_estaciones <- merge(data.frame(STATION_ID = coord$STATION_ID, longitud = co
                          data.frame(STATION_ID = alt$STATION_ID, altitud = alt$alt),
                          by = "STATION_ID", all = TRUE)
 
-# Altitud faltante con un modelo digital de elevacion
+# Imputar altitud faltante con satelite
 elevacion_col <- elevation_30s(country = "COL", path = tempdir())
 con_coordenadas <- !is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud)
 info_estaciones$altitud_DEM <- NA
 info_estaciones$altitud_DEM[con_coordenadas] <-
   terra::extract(elevacion_col, as.matrix(info_estaciones[con_coordenadas, c("longitud", "latitud")]))[, 1]
 
-# Comparacion con las estaciones que tienen altitud en el catalogo
+# Comparacion con las estaciones que tienen altitud
 ambas <- !is.na(info_estaciones$altitud) & !is.na(info_estaciones$altitud_DEM)
 comparacion_altitud <- data.frame(
   estaciones = sum(ambas),
@@ -97,17 +118,16 @@ comparacion_altitud <- data.frame(
 comparacion_altitud
 
 plot(info_estaciones$altitud[ambas], info_estaciones$altitud_DEM[ambas], pch = 16, cex = 0.6,
-     xlab = "Altitud del catalogo (m)", ylab = "Altitud del DEM (m)", main = "Altitud: catalogo frente a DEM")
+     xlab = "Altitud datos (m)", ylab = "Altitud satélite (m)", main = "Altitud: de los datos frente a satélite")
 abline(0, 1, lty = 2, col = "red")
-guardar_figura("01_altitud_DEM_comparacion.png", 6, 6)
+guardar_figura("01_altitud_imputada_comparacion.png", 6, 6)
 
-# Altitud del catalogo y, si falta, la del DEM
-info_estaciones$altitud_completa <- ifelse(is.na(info_estaciones$altitud),
-                                           info_estaciones$altitud_DEM, info_estaciones$altitud)
-info_estaciones$fuente_altitud <- ifelse(!is.na(info_estaciones$altitud), "Catalogo",
-                                         ifelse(!is.na(info_estaciones$altitud_DEM), "DEM", NA))
+# Imputar altitud si es menor a 2000 m
+usar_dem <- is.na(info_estaciones$altitud) & !is.na(info_estaciones$altitud_DEM) & info_estaciones$altitud_DEM < 2000
+info_estaciones$altitud_completa <- ifelse(usar_dem, info_estaciones$altitud_DEM, info_estaciones$altitud)
+info_estaciones$fuente_altitud <- ifelse(!is.na(info_estaciones$altitud), "Datos", ifelse(usar_dem, "Imputada", NA))
 table(info_estaciones$fuente_altitud, useNA = "ifany")
-guardar_tabla(comparacion_altitud, "01_altitud_DEM_comparacion.csv")
+guardar_tabla(comparacion_altitud, "01_altitud_imputada_comparacion.csv")
 
 # Borde del Valle
 departamentos_col <- gadm(country = "COL", level = 1, path = tempdir())
@@ -115,17 +135,17 @@ valle <- departamentos_col[departamentos_col$NAME_1 == "Valle del Cauca", ]
 
 
 #################### Particion por estaciones ####################
-# Sorteo por terciles de altitud: 70 % entrenamiento, 15 % validacion y 15 % prueba
-# La particion solo se usa en el modelo; el EDA y las comparaciones usan todos los datos
-estaciones_particion <- info_estaciones[info_estaciones$STATION_ID %in% c(p_tierra$STATION_ID, p_prueba$STATION_ID) &
+# 70 % entrenamiento, 15 % validacion y 15 % prueba
+# EDA y las comparaciones usan todos los datos
+estaciones_particion <- info_estaciones[info_estaciones$STATION_ID %in% p_tierra$STATION_ID &
                                           !is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
                                           !is.na(info_estaciones$altitud_completa),
                                         c("STATION_ID", "altitud_completa")]
 estaciones_particion$tercil_altitud <- cut(estaciones_particion$altitud_completa,
                                            quantile(estaciones_particion$altitud_completa, c(0, 1/3, 2/3, 1)),
                                            labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
-con_prueba <- estaciones_particion$STATION_ID %in% p_prueba$STATION_ID
-con_validacion <- estaciones_particion$STATION_ID %in% p_tierra$STATION_ID[p_tierra$YEAR >= 1996]
+con_prueba <- estaciones_particion$STATION_ID %in% p_tierra$STATION_ID[p_tierra$YEAR >= 2001]
+con_validacion <- estaciones_particion$STATION_ID %in% p_tierra$STATION_ID[p_tierra$YEAR >= 1996 & p_tierra$YEAR <= 2000]
 
 set.seed(2026)
 estaciones_particion$particion <- "entrenamiento"
@@ -141,10 +161,10 @@ table(estaciones_particion$tercil_altitud, estaciones_particion$particion)
 guardar_tabla(estaciones_particion[order(estaciones_particion$particion, estaciones_particion$STATION_ID), ],
               "01_particion_estaciones.csv")
 
-# Conjunto de cada curva estacion-año ("sin_uso" si queda fuera de su periodo)
+
 particion_curva <- function(estacion, anio) {
   grupo <- estaciones_particion$particion[match(as.character(estacion), estaciones_particion$STATION_ID)]
-  grupo[is.na(grupo)] <- "entrenamiento"
+  grupo[is.na(grupo)] <- "sin_uso"
   ifelse(grupo == "entrenamiento" & anio <= 1995, "entrenamiento",
          ifelse(grupo == "validacion" & anio >= 1996 & anio <= 2000, "validacion",
                 ifelse(grupo == "prueba" & anio >= 2001, "prueba", "sin_uso")))
@@ -152,28 +172,31 @@ particion_curva <- function(estacion, anio) {
 # Estaciones de entrenamiento, referencia del preprocesamiento
 es_entrenamiento <- function(estacion) {
   grupo <- estaciones_particion$particion[match(as.character(estacion), estaciones_particion$STATION_ID)]
-  is.na(grupo) | grupo == "entrenamiento"
+  !is.na(grupo) & grupo == "entrenamiento"
 }
 
 
 #################### Preprocesamiento de las estaciones ####################
-# Valores imposibles y errores de digitacion
+# Las reglas se revisan con las estaciones de entrenamiento (1981-1995) y se aplican a todos los datos
+p_revision <- p_tierra[es_entrenamiento(p_tierra$STATION_ID) & p_tierra$YEAR <= 1995, ]
+
 # Valores negativos 
 sum(p_tierra$VALUE < 0, na.rm = TRUE)
-sum(p_prueba$VALUE < 0, na.rm = TRUE)
 
-summary(p_tierra)
-quantile(p_tierra$VALUE, probs = c(0.5, 0.9, 0.95, 0.99, 0.999, 0.99999), na.rm = TRUE)
-tapply(p_tierra$VALUE, p_tierra$YEAR, summary)
+summary(p_revision)
+quantile(p_revision$VALUE, probs = c(0.5, 0.9, 0.95, 0.99, 0.999, 0.99999), na.rm = TRUE)
+tapply(p_revision$VALUE, p_revision$YEAR, summary)
 
 # Valores mayores a 300 mm
-mayores_300 <- p_tierra[p_tierra$VALUE > 300, c("STATION_ID", "YEAR", "MONTH", "DAY", "VALUE")]
+mayores_300 <- p_revision[which(p_revision$VALUE > 300), c("STATION_ID", "YEAR", "MONTH", "DAY", "VALUE")]
 mayores_300 <- mayores_300[order(-mayores_300$YEAR), ]
-mayores_300
-guardar_tabla(mayores_300, "01_preprocesamiento_mayores_300mm.csv")
+
+n_mayores <- nrow(mayores_300)
+n_total <- sum(!is.na(p_revision$VALUE))
+round(100 * n_mayores / n_total, 4)
 
 # Histograma sin los valores extremos
-hist(p_tierra$VALUE[p_tierra$VALUE < 130],
+hist(p_revision$VALUE[p_revision$VALUE < 130],
      main = "Precipitación diaria", xlab = "Precipitación (mm)", ylab = "Frecuencia")
 guardar_figura("01_preprocesamiento_histograma_diaria.png", 7, 5)
 
@@ -185,7 +208,7 @@ casos <- casos[order(casos$YEAR, casos$STATION_ID), ]
 png("Figuras/01_preprocesamiento_casos_mayores_300mm_%02d.png", width = 12, height = 7, units = "in", res = 150)
 par(mfrow = c(2, 3))
 for (i in 1:nrow(casos)) {
-  d <- p_tierra[p_tierra$STATION_ID == casos$STATION_ID[i] & p_tierra$YEAR == casos$YEAR[i], ]
+  d <- p_revision[p_revision$STATION_ID == casos$STATION_ID[i] & p_revision$YEAR == casos$YEAR[i], ]
   plot(d$fecha, d$VALUE, type = "b", pch = 16, cex = 0.4, lwd = 0.5, col = "steelblue",
        ylim = c(0, min(max(d$VALUE), 1000)),
        xlab = "Fecha", ylab = "Precipitación (mm)",
@@ -209,6 +232,30 @@ errores_aislados <- data.frame(p_tierra[error, c("STATION_ID", "YEAR", "MONTH", 
 errores_aislados
 guardar_tabla(errores_aislados, "01_preprocesamiento_errores_aislados.csv")
 
+# Grafico valores altos de precipitacion
+png("Figuras/01_errores_aislados_anio_completo.png", width = 10, height = 3 * nrow(errores_aislados),
+    units = "in", res = 150)
+par(mfrow = c(nrow(errores_aislados), 1), mar = c(4, 4, 3, 1))
+for (i in seq_len(nrow(errores_aislados))) {
+  s <- errores_aislados$STATION_ID[i]
+  f <- p_tierra$fecha[error[i]]
+  anio <- errores_aislados$YEAR[i]
+  datos <- p_tierra[p_tierra$STATION_ID == s & p_tierra$YEAR == anio, ]
+  valor_error <- errores_aislados$VALUE[i]
+  
+  y_resto <- datos$VALUE[datos$fecha != f]
+  ymax <- max(c(y_resto, 50), na.rm = TRUE) * 1.2
+  
+  plot(datos$fecha, ifelse(datos$fecha == f, NA, datos$VALUE), type = "h",
+       ylim = c(0, ymax), xlab = "Fecha", ylab = "Precipitacion (mm)",
+       main = paste0("Estacion ", s, " - año ", anio))
+  points(f, ymax, pch = 17, col = "red", cex = 1.5)
+  text(f, ymax, labels = paste(format(f, "%d-%m"), ":", valor_error, "mm"), pos = 1, col = "red", cex = 0.8)
+}
+dev.off()
+par(mfrow = c(1, 1))
+guardar_figura("01_errores_aislados_anio_completo.png", 10, 3 * nrow(errores_aislados))
+
 p_tierra$VALUE[error] <- NA
 
 trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_tierra, "Errores aislados"))
@@ -229,7 +276,7 @@ resumen_mensual <- p_m %>%
 
 resumen_mensual$proporcion_fin_mes <- resumen_mensual$valor_fin_mes / resumen_mensual$total_observado
 
-# Candidatos: ultimo dia con 100 mm o mas y al menos el 80 % del mes
+# Candidatos: ultimo dia con 100 mm o mas y al menos el 80 % del mes sin dato
 candidatos_M <- resumen_mensual[which(resumen_mensual$valor_fin_mes >= 100 &
                                         resumen_mensual$proporcion_fin_mes >= 0.80), ]
 nrow(candidatos_M)
@@ -260,95 +307,9 @@ p_m_depurado$VALUE[acumulados] <- NA
 
 trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_m_depurado, "Acumulados mensuales"))
 
-# Ceros falsos
-# Meses con muchos ceros y un pico al final del mes
-diagnostico_ceros_M <- resumen_mensual[which(resumen_mensual$n_registros >= 25 & resumen_mensual$n_ceros >= 20 &
-                                               resumen_mensual$n_positivos <= 3 & resumen_mensual$valor_fin_mes >= 30 &
-                                               resumen_mensual$proporcion_fin_mes >= 0.80), ]
-diagnostico_ceros_M
-
-# Porcentaje de ceros de cada mes
-resumen_mensual$pct_ceros <- 100 * resumen_mensual$n_ceros / resumen_mensual$n_validos
-
-# Comparacion con otras estaciones y con su historico
-clave_ceros <- paste(diagnostico_ceros_M$STATION_ID, diagnostico_ceros_M$YEAR, diagnostico_ceros_M$MONTH)
-referencia <- resumen_mensual[resumen_mensual$n_registros >= 25 & resumen_mensual$n_validos >= 25 &
-                                es_entrenamiento(resumen_mensual$STATION_ID) &
-                                !paste(resumen_mensual$STATION_ID, resumen_mensual$YEAR, resumen_mensual$MONTH) %in% clave_ceros, ]
-
-diagnostico_ceros_M$pct_ceros <- round(100 * diagnostico_ceros_M$n_ceros / diagnostico_ceros_M$n_registros, 1)
-diagnostico_ceros_M$mediana_mismo_anio <- NA
-diagnostico_ceros_M$mediana_historica <- NA
-
-for (i in 1:nrow(diagnostico_ceros_M)) {
-  otras <- referencia[referencia$MONTH == diagnostico_ceros_M$MONTH[i] &
-                        referencia$STATION_ID != diagnostico_ceros_M$STATION_ID[i], ]
-  diagnostico_ceros_M$mediana_mismo_anio[i] <- median(otras$pct_ceros[otras$YEAR == diagnostico_ceros_M$YEAR[i]])
-  diagnostico_ceros_M$mediana_historica[i] <- median(otras$pct_ceros[otras$YEAR <= 1995 &
-                                                                       otras$YEAR != diagnostico_ceros_M$YEAR[i]])
-}
-
-diagnostico_ceros_M$diferencia_mismo_anio <- round(diagnostico_ceros_M$pct_ceros - diagnostico_ceros_M$mediana_mismo_anio, 1)
-diagnostico_ceros_M$diferencia_historica <- round(diagnostico_ceros_M$pct_ceros - diagnostico_ceros_M$mediana_historica, 1)
-print(diagnostico_ceros_M[order(-diagnostico_ceros_M$diferencia_mismo_anio), ], width = Inf)
-guardar_tabla(diagnostico_ceros_M[order(-diagnostico_ceros_M$diferencia_mismo_anio), ],
-              "01_preprocesamiento_ceros_pico_fin_de_mes.csv")
-
-# Meses completos con todos los valores en cero
-resumen_mensual$dias_mes <- c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[resumen_mensual$MONTH]
-resumen_mensual$dias_mes[resumen_mensual$MONTH == 2 & resumen_mensual$YEAR %% 4 == 0] <- 29
-
-todo_cero <- resumen_mensual[resumen_mensual$n_registros == resumen_mensual$dias_mes &
-                               resumen_mensual$n_validos == resumen_mensual$dias_mes &
-                               resumen_mensual$n_ceros == resumen_mensual$dias_mes, ]
-nrow(todo_cero)
-
-# Comparacion con su historico y con la region
-todo_cero$mediana_historica <- NA
-todo_cero$mediana_regional <- NA
-
-for (i in 1:nrow(todo_cero)) {
-  historico <- resumen_mensual[resumen_mensual$STATION_ID == todo_cero$STATION_ID[i] &
-                                 es_entrenamiento(todo_cero$STATION_ID[i]) &
-                                 resumen_mensual$MONTH == todo_cero$MONTH[i] &
-                                 resumen_mensual$YEAR <= 1995 & resumen_mensual$YEAR != todo_cero$YEAR[i] &
-                                 resumen_mensual$n_validos >= 25, ]
-  region <- resumen_mensual[resumen_mensual$YEAR == todo_cero$YEAR[i] & resumen_mensual$MONTH == todo_cero$MONTH[i] &
-                              resumen_mensual$n_validos >= 25 & es_entrenamiento(resumen_mensual$STATION_ID), ]
-  todo_cero$mediana_historica[i] <- median(historico$pct_ceros)
-  todo_cero$mediana_regional[i] <- median(region$pct_ceros)
-}
-
-todo_cero$diferencia_historica <- round(100 - todo_cero$mediana_historica, 1)
-todo_cero$diferencia_regional <- round(100 - todo_cero$mediana_regional, 1)
-print(todo_cero[order(-todo_cero$diferencia_regional), c("STATION_ID", "YEAR", "MONTH", "mediana_historica",
-                                                         "mediana_regional", "diferencia_historica",
-                                                         "diferencia_regional")], n = 30)
-guardar_tabla(todo_cero[order(-todo_cero$diferencia_regional), ], "01_preprocesamiento_meses_todo_cero.csv")
-
-# Meses que pasan a NA
-ceros_pico <- diagnostico_ceros_M[which(diagnostico_ceros_M$diferencia_mismo_anio >= 10), ]
-ceros_completos <- todo_cero[which(todo_cero$diferencia_regional >= 25 &
-                                     (is.na(todo_cero$diferencia_historica) | todo_cero$diferencia_historica >= 25)), ]
-meses_ceros <- rbind(data.frame(ceros_pico[, c("STATION_ID", "YEAR", "MONTH")], tipo = "Pico al final del mes"),
-                     data.frame(ceros_completos[, c("STATION_ID", "YEAR", "MONTH")], tipo = "Mes completo en cero"))
-meses_ceros
-guardar_tabla(meses_ceros, "01_preprocesamiento_meses_ceros_falsos.csv")
-
-ceros_falsos <- which(!is.na(p_m_depurado$VALUE) &
-                        paste(p_m_depurado$STATION_ID, p_m_depurado$YEAR, p_m_depurado$MONTH) %in%
-                        paste(meses_ceros$STATION_ID, meses_ceros$YEAR, meses_ceros$MONTH))
-length(ceros_falsos)
-
-p_m_depurado$VALUE[ceros_falsos] <- NA
-
-trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(p_m_depurado, "Ceros falsos"))
-
 # Trazabilidad
 trazabilidad <- rbind(data.frame(p_m[acumulados, c("STATION_ID", "fecha", "VALUE")],
-                                 motivo = "Precipitacion final >= 100 mm y >= 80% del total mensual"),
-                      data.frame(p_m[ceros_falsos, c("STATION_ID", "fecha", "VALUE")],
-                                 motivo = "Mes con ceros sospechosos"))
+                                 motivo = "Precipitacion final >= 100 mm y >= 80% del total mensual"))
 trazabilidad
 guardar_tabla(trazabilidad, "01_preprocesamiento_registros_eliminados.csv")
 
@@ -367,7 +328,7 @@ borde_max <- function(x) {
 }
 
 # Calendario completo de cada estacion-año
-fechas <- data.frame(fecha = seq(as.Date("1981-01-01"), as.Date("2000-12-31"), by = "day"))
+fechas <- data.frame(fecha = seq(as.Date("1981-01-01"), as.Date("2003-12-31"), by = "day"))
 fechas$YEAR <- as.numeric(format(fechas$fecha, "%Y"))
 
 calendario <- merge(unique(p_m_depurado[, c("STATION_ID", "YEAR")]), fechas, by = "YEAR")
@@ -411,69 +372,6 @@ cat("Pares estacion-año antes:", nrow(cobertura), "| aptos:", sum(cobertura$apt
 cat("Estaciones antes:", length(unique(cobertura$STATION_ID)),
     "| despues:", length(unique(cobertura$STATION_ID[cobertura$apto])), "\n")
 
-
-# Conjunto de prueba
-# Mismas reglas
-
-# Errores aislados
-p_prueba$fin_mes <- format(p_prueba$fecha + 1, "%d") == "01"
-n <- nrow(p_prueba)
-anterior  <- c(NA, p_prueba$VALUE[-n])
-siguiente <- c(p_prueba$VALUE[-1], NA)
-vecino_max <- pmax(anterior, siguiente, na.rm = TRUE)
-
-error_prueba <- which(p_prueba$VALUE > 400 & p_prueba$VALUE > 5 * vecino_max & !p_prueba$fin_mes)
-p_prueba[error_prueba, c("STATION_ID", "YEAR", "MONTH", "DAY", "VALUE")]
-p_prueba$VALUE[error_prueba] <- NA
-
-trazabilidad_prueba <- rbind(trazabilidad_prueba, contar(p_prueba, "Errores aislados"))
-
-# Acumulados mensuales
-resumen_prueba <- p_prueba %>%
-  group_by(STATION_ID, YEAR, MONTH) %>%
-  summarize(total_observado = sum(VALUE, na.rm = TRUE),
-            valor_fin_mes = if (any(fin_mes)) VALUE[fin_mes] else NA_real_,
-            .groups = "drop")
-
-candidatos_prueba <- resumen_prueba[which(resumen_prueba$valor_fin_mes >= 100 &
-                                            resumen_prueba$valor_fin_mes / resumen_prueba$total_observado >= 0.80), ]
-acumulados_prueba <- which(p_prueba$fin_mes & !is.na(p_prueba$VALUE) &
-                             paste(p_prueba$STATION_ID, p_prueba$YEAR, p_prueba$MONTH) %in%
-                             paste(candidatos_prueba$STATION_ID, candidatos_prueba$YEAR, candidatos_prueba$MONTH))
-length(acumulados_prueba)
-p_prueba$VALUE[acumulados_prueba] <- NA
-
-trazabilidad_prueba <- rbind(trazabilidad_prueba, 
-                             contar(p_prueba, "Acumulados mensuales"))
-
-# Cobertura
-fechas_prueba <- data.frame(fecha = seq(as.Date("2001-01-01"), as.Date("2003-12-31"), by = "day"))
-fechas_prueba$YEAR <- as.numeric(format(fechas_prueba$fecha, "%Y"))
-
-calendario_prueba <- merge(unique(p_prueba[, c("STATION_ID", "YEAR")]), fechas_prueba, by = "YEAR")
-calendario_prueba <- merge(calendario_prueba, p_prueba[, c("STATION_ID", "fecha", "VALUE")],
-                           by = c("STATION_ID", "fecha"), all.x = TRUE)
-calendario_prueba <- calendario_prueba[order(calendario_prueba$STATION_ID, calendario_prueba$fecha), ]
-
-cobertura_prueba <- calendario_prueba %>%
-  group_by(STATION_ID, YEAR) %>%
-  summarize(cobertura = mean(!is.na(VALUE)),
-            hueco = racha_max(VALUE),
-            borde = borde_max(VALUE),
-            .groups = "drop")
-
-cobertura_prueba$apto <- cobertura_prueba$cobertura >= 0.95 & cobertura_prueba$hueco <= 7 & cobertura_prueba$borde <= 7
-
-trazabilidad_prueba <- rbind(trazabilidad_prueba, 
-                             contar(p_prueba[paste(p_prueba$STATION_ID, 
-                                                   p_prueba$YEAR) %in% 
-                                               paste(cobertura_prueba$STATION_ID, 
-                                                     cobertura_prueba$YEAR)[cobertura_prueba$apto], ], "Cobertura minima"))
-
-cat("Prueba - errores:", length(error_prueba), "| acumulados:", length(acumulados_prueba),
-    "| pares antes:", nrow(cobertura_prueba), "| pares aptos:", sum(cobertura_prueba$apto),
-    "| estaciones aptas:", length(unique(cobertura_prueba$STATION_ID[cobertura_prueba$apto])), "\n")
-
 # Pentadas de las estaciones
 # Datos diarios de los pares aptos
 pares_aptos <- paste(cobertura$STATION_ID, cobertura$YEAR)[cobertura$apto]
@@ -496,7 +394,6 @@ dim(Y_terrestre_total)
 
 
 #################### Fases ENSO (ONI) ####################
-
 tabla_oni <- read_excel("data/ONI_1981_2003.xlsx")
 names(tabla_oni)[-1] <- c("DEF", "EFM", "FMA", "MAM", "AMJ", "MJJ",
                           "JJA", "JAS", "ASO", "SON", "OND", "NDE")
@@ -576,10 +473,10 @@ guardar_tabla(oni_anual, "02_ONI_resumen_anual.csv")
 
 #################### Emparejamiento estacion-pixel ####################
 # Satelite y pixel de cada estacion
-# Imagenes pentadales de 1981 a 2000
+# Imagenes pentadales de 1981 a 2003
 archivos <- list.files("data/ImagenesSatelitePentadal", pattern = "ppt.*\\.tif$", full.names = TRUE)
 anio_archivo <- as.numeric(substr(basename(archivos), 4, 7))
-archivos <- archivos[anio_archivo <= 2000]
+archivos <- archivos[anio_archivo <= 2003]
 # 72 imagenes por año
 table(substr(basename(archivos), 4, 7))
 
@@ -623,9 +520,7 @@ metadatos <- curvas[curvas$estado == "Emparejado", ]
 trazabilidad_pasos <- rbind(trazabilidad_pasos,
                             contar(datos_tierra[datos_tierra$curva %in% metadatos$curva, ], "Emparejamiento estacion-pixel"))
 trazabilidad_pasos
-trazabilidad_prueba
-guardar_tabla(trazabilidad_pasos, "01_preprocesamiento_trazabilidad_1981_2000.csv")
-guardar_tabla(trazabilidad_prueba, "01_preprocesamiento_trazabilidad_prueba_2001_2003.csv")
+guardar_tabla(trazabilidad_pasos, "01_preprocesamiento_trazabilidad.csv")
 
 Y_est <- Y_terrestre_total[, metadatos$curva]
 X_sat <- matrix(NA, 72, nrow(metadatos), dimnames = list(1:72, metadatos$curva))
@@ -638,7 +533,6 @@ dim(Y_est)
 dim(X_sat)
 sum(is.na(Y_est))
 sum(!is.na(metadatos$altitud))
-
 
 # Matrices y particion
 tiempos <- 1:72
@@ -671,58 +565,10 @@ faltantes_curva <- rowSums(is.na(Y_matriz))
 table(faltantes_curva)
 faltantes_curva[faltantes_curva > 0]
 
-# Conjunto de prueba (2001-2003)
-# Pares aptos de 2001 a 2003
-metadatos_prueba <- cobertura_prueba[cobertura_prueba$apto, c("STATION_ID", "YEAR")]
-metadatos_prueba <- merge(metadatos_prueba, info_estaciones, by = "STATION_ID", all.x = TRUE)
-metadatos_prueba$curva <- paste(metadatos_prueba$STATION_ID, metadatos_prueba$YEAR, sep = "_")
-metadatos_prueba <- metadatos_prueba[order(metadatos_prueba$curva), ]
-
-archivos_satelite_prueba <- list.files("data/ImagenesSatelitePentadal",
-                                       pattern = "^ppt200[1-3][0-9]{2}\\.tif$", full.names = TRUE)
-satelite_prueba <- rast(archivos_satelite_prueba)
-
-# Pixel de cada estacion (por coordenadas si es nueva)
-estaciones_prueba <- unique(metadatos_prueba[, c("STATION_ID", "longitud", "latitud")])
-indice_estacion <- match(estaciones_prueba$STATION_ID, estaciones$STATION_ID)
-estaciones_prueba$pixel <- estaciones$pixel[indice_estacion]
-estaciones_nuevas <- is.na(indice_estacion) & complete.cases(estaciones_prueba[, c("longitud", "latitud")])
-if (any(estaciones_nuevas)) {
-  estaciones_prueba$pixel[estaciones_nuevas] <-
-    cellFromXY(satelite_prueba, as.matrix(estaciones_prueba[estaciones_nuevas, c("longitud", "latitud")]))
-}
-metadatos_prueba$pixel <- estaciones_prueba$pixel[match(metadatos_prueba$STATION_ID, estaciones_prueba$STATION_ID)]
-
-# Lluvia satelital de 2001 a 2003 por pixel y año
-pixeles_prueba <- unique(na.omit(metadatos_prueba$pixel))
-lluvia_satelite_prueba <- as.matrix(terra::extract(satelite_prueba, pixeles_prueba))
-X_prueba <- matrix(NA, nrow(metadatos_prueba), 72, dimnames = list(metadatos_prueba$curva, colnames(X_matriz)))
-for (i in which(!is.na(metadatos_prueba$pixel))) {
-  capas <- paste0("ppt", metadatos_prueba$YEAR[i], sprintf("%02d", tiempos))
-  fila <- match(metadatos_prueba$pixel[i], pixeles_prueba)
-  X_prueba[i, ] <- lluvia_satelite_prueba[fila, match(capas, colnames(lluvia_satelite_prueba))]
-}
-emparejados_prueba <- complete.cases(X_prueba)
-X_prueba <- X_prueba[emparejados_prueba, ]
-metadatos_prueba <- metadatos_prueba[emparejados_prueba, ]
-metadatos_prueba$estado <- "Emparejado"
-
-# Lluvia de las estaciones por pentada
-datos_prueba <- merge(calendario_prueba, metadatos_prueba[, c("STATION_ID", "YEAR", "curva")],
-                      by = c("STATION_ID", "YEAR"))
-mes_prueba <- as.integer(format(datos_prueba$fecha, "%m"))
-dia_prueba <- as.integer(format(datos_prueba$fecha, "%d"))
-datos_prueba$pentada <- (mes_prueba - 1) * 6 + pmin(6, (dia_prueba - 1) %/% 5 + 1)
-Y_prueba <- t(tapply(datos_prueba$VALUE, list(datos_prueba$pentada, datos_prueba$curva), sum))
-Y_prueba <- Y_prueba[rownames(X_prueba), ]
-colnames(Y_prueba) <- colnames(Y_matriz)
-nrow(Y_prueba)
-
-# Matrices emparejadas de 1981 a 2003
-metadatos_completos <- rbind(metadatos, metadatos_prueba[, names(metadatos)])
-Y_completa <- rbind(Y_matriz, Y_prueba)
-X_completa <- rbind(X_matriz, X_prueba)
-
+# Matrices emparejadas de 1981 a 2003 (la particion separa entrenamiento, validacion y prueba)
+metadatos_completos <- metadatos
+Y_completa <- Y_matriz
+X_completa <- X_matriz
 
 
 # Verificacion del emparejamiento estacion-pixel
@@ -733,7 +579,7 @@ crs(p_sat, describe = TRUE)[, c("name", "code")]
 same.crs(puntos, p_sat)
 ext(p_sat)
 res(p_sat)
-# 20 años por 72 pentadas
+# 23 años por 72 pentadas
 nlyr(p_sat)
 puntos_r <- project(puntos, crs(p_sat))
 # Pixeles que cambian al reproyectar
@@ -959,45 +805,45 @@ tabla
 guardar_tabla(tabla, "04_construccion_criterios_todas_las_bases.csv")
 
 # Mejor parametro de cada fuente, base y metodo
-ablacion <- tabla[order(tabla$fuente, tabla$VC), ]
+ablacion <- tabla[order(tabla$fuente, tabla$VCG), ]
 ablacion <- ablacion[!duplicated(ablacion[, c("fuente", "base", "metodo")]), ]
 ablacion
 guardar_tabla(ablacion, "04_construccion_ablacion.csv")
 
-# Graficas de VC de MCO y MCP
+# VCG de MCO y MCP
 par(mfrow = c(2, 3))
 for (f in c("estaciones", "satelite")) {
   for (nombre in names(valores_K)) {
     mco <- tabla[tabla$fuente == f & tabla$base == nombre & tabla$metodo == "MCO", ]
     mcp <- tabla[tabla$fuente == f & tabla$base == nombre & tabla$metodo == "MCP", ]
-    plot(mco$parametro, mco$VC, type = "b", pch = 19, xlab = "K", ylab = "VC",
-         main = paste(nombre, "-", f), ylim = range(mco$VC, mcp$VC))
-    lines(mcp$parametro, mcp$VC, type = "b", pch = 17, col = "red")
+    plot(mco$parametro, mco$VCG, type = "b", pch = 19, xlab = "K", ylab = "VCG",
+         main = paste(nombre, "-", f), ylim = range(mco$VCG, mcp$VCG))
+    lines(mcp$parametro, mcp$VCG, type = "b", pch = 17, col = "red")
     legend("topright", c("MCO", "MCP"), col = c("black", "red"), pch = c(19, 17), bty = "n")
   }
 }
-guardar_figura("04_construccion_VC_MCO_MCP.png", 12, 7)
+guardar_figura("04_construccion_VCG_MCO_MCP.png", 12, 7)
 par(mfrow = c(1, 1))
 
-# Graficas de VC de la penalizacion
+# VCG de la penalizacion
 par(mfrow = c(1, 2))
 for (f in c("estaciones", "satelite")) {
   b <- tabla[tabla$fuente == f & tabla$base == "B-spline" & tabla$metodo == "Penalizacion", ]
   fo <- tabla[tabla$fuente == f & tabla$base == "Fourier" & tabla$metodo == "Penalizacion", ]
-  plot(b$parametro, b$VC, type = "b", pch = 19, xlab = expression(log[10](lambda)), ylab = "VC",
-       main = paste("Penalizacion -", f), ylim = range(b$VC, fo$VC))
-  lines(fo$parametro, fo$VC, type = "b", pch = 17, col = "red")
+  plot(b$parametro, b$VCG, type = "b", pch = 19, xlab = expression(log[10](lambda)), ylab = "VCG",
+       main = paste("Penalizacion -", f), ylim = range(b$VCG, fo$VCG))
+  lines(fo$parametro, fo$VCG, type = "b", pch = 17, col = "red")
   legend("topright", c("B-spline", "Fourier"), col = c("black", "red"), pch = c(19, 17), bty = "n")
 }
-guardar_figura("04_construccion_VC_penalizacion.png", 10, 5)
+guardar_figura("04_construccion_VCG_penalizacion.png", 10, 5)
 par(mfrow = c(1, 1))
 
 
-# Construccion elegida: B-spline cubica con MCP y K de menor VC
+# Construccion elegida: B-spline cubica con MCP y K de menor VCG
 estaciones_MCP <- tabla[tabla$fuente == "estaciones" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
 satelite_MCP <- tabla[tabla$fuente == "satelite" & tabla$base == "B-spline" & tabla$metodo == "MCP", ]
-K_estaciones <- estaciones_MCP$parametro[which.min(estaciones_MCP$VC)]
-K_satelite <- satelite_MCP$parametro[which.min(satelite_MCP$VC)]
+K_estaciones <- estaciones_MCP$parametro[which.min(estaciones_MCP$VCG)]
+K_satelite <- satelite_MCP$parametro[which.min(satelite_MCP$VCG)]
 K_estaciones
 K_satelite
 
@@ -1026,7 +872,7 @@ pesos_satelite <- pesos_MCP(X_train, Phi_satelite)
 guardar_tabla(data.frame(pentada = tiempos, estaciones = pesos_estaciones, satelite = pesos_satelite),
               "04_construccion_pesos_MCP.csv")
 
-# Ajuste MCP de cada curva con sus pentadas observadas
+# Ajuste MCP de cada curva
 ajuste_MCP <- function(datos, Phi, pesos) {
   coeficientes <- matrix(NA, nrow(datos), ncol(Phi), dimnames = list(rownames(datos), NULL))
   ajustes <- matrix(NA, nrow(datos), 72, dimnames = dimnames(datos))
@@ -1056,7 +902,7 @@ construccion_completa <- list(
 parametros_construccion <- data.frame(
   fuente = c("estaciones", "satelite"), base = "B-spline", metodo = "MCP", orden = 4,
   K = c(K_estaciones, K_satelite),
-  VC = c(min(estaciones_MCP$VC), min(satelite_MCP$VC)))
+  VCG = c(min(estaciones_MCP$VCG), min(satelite_MCP$VCG)))
 parametros_construccion
 guardar_tabla(parametros_construccion, "04_construccion_K_elegido.csv")
 
@@ -1189,6 +1035,39 @@ guardar_figura("04_construccion_varianza_residual_pares.png", 6, 6)
 sigma2_estaciones <- colMeans(residuos_estaciones^2, na.rm = TRUE)
 sigma2_satelite <- colMeans(residuos_satelite^2, na.rm = TRUE)
 
+# Covarianza residual entre pentadas: promedio de e e^T sobre las curvas (solo pares de pentadas observadas)
+covarianza_residual <- function(residuos) {
+  observado <- !is.na(residuos)
+  residuos[!observado] <- 0
+  crossprod(residuos) / crossprod(observado)
+}
+Sigma_estaciones <- covarianza_residual(residuos_estaciones)
+Sigma_satelite <- covarianza_residual(residuos_satelite)
+
+par(mfrow = c(1, 2))
+for (f in c("estaciones", "satelite")) {
+  Sigma <- if (f == "estaciones") Sigma_estaciones else Sigma_satelite
+  limite_z <- max(abs(Sigma))
+  image(tiempos, tiempos, Sigma, zlim = c(-limite_z, limite_z), col = hcl.colors(41, "Blue-Red 3"),
+        xlab = "Pentada", ylab = "Pentada", main = paste("Covarianza residual -", f))
+}
+guardar_figura("04_construccion_covarianza_residual.png", 11, 5)
+par(mfrow = c(1, 1))
+
+# Correlacion residual media segun la distancia entre pentadas
+resumen_covarianza <- data.frame()
+for (f in c("estaciones", "satelite")) {
+  Sigma <- if (f == "estaciones") Sigma_estaciones else Sigma_satelite
+  Rho <- Sigma / sqrt(diag(Sigma) %o% diag(Sigma))
+  distancia <- abs(outer(tiempos, tiempos, "-"))
+  resumen_covarianza <- rbind(resumen_covarianza, data.frame(
+    fuente = f, varianza_media = mean(diag(Sigma)),
+    correlacion_rezago_1 = mean(Rho[distancia == 1]), correlacion_rezago_2 = mean(Rho[distancia == 2]),
+    correlacion_rezago_3_o_mas = mean(Rho[distancia >= 3])))
+}
+resumen_covarianza
+guardar_tabla(resumen_covarianza, "04_construccion_covarianza_residual.csv")
+
 # Varianza de la curva ajustada
 varianza_ajuste <- function(y, Phi, pesos, sigma2) {
   obs <- which(!is.na(y))
@@ -1298,92 +1177,6 @@ tabla_cambios <- data.frame(pentada = 1:72, original = Media_original, funcional
 head(tabla_cambios[order(-abs(tabla_cambios$cambio)), ], 10)
 
 
-# Sensibilidad de K en MCP
-# K en entrenamiento y validacion
-K_prueba <- c(6, 8, 10, 12, 15)
-
-# Mismas bases B-spline
-base_prueba <- function(K) {
-  b <- create.bspline.basis(c(0, 72), nbasis = K, norder = 4)
-  eval.basis(tiempos, b)
-}
-
-# Ajuste MCP y VC dejando una pentada por fuera
-evaluar_curvas <- function(datos, Phi, pesos, conjunto, K) {
-  resumen <- matrix(NA_real_, nrow(datos), 8)
-  colnames(resumen) <- c("SSE", "nobs", "SCV", "ncv", "SCV_fin", "ncv_fin", "sesgo_P72", "error_P72")
-  media_ajustada <- rep(0, 72)
-  n_ajustadas <- 0
-  for (i in seq_len(nrow(datos))) {
-    obs <- which(is.finite(datos[i, ]))
-    P <- Phi[obs, , drop = FALSE]
-    w <- pesos[obs]
-    Ainv <- solve(crossprod(P, P * w))
-    coef <- Ainv %*% t(P * w) %*% datos[i, obs]
-    pred <- as.vector(Phi %*% coef)
-    resid <- datos[i, obs] - pred[obs]
-    # Diagonal de la matriz suavizadora
-    h <- rowSums((P %*% Ainv) * P) * w
-    ecv <- resid / (1 - h)
-    es_fin <- obs >= 67
-    resumen[i, ] <- c(sum(resid^2), length(obs), sum(ecv^2), length(ecv),
-                      sum(ecv[es_fin]^2), sum(es_fin),
-                      if (72 %in% obs) pred[72] - datos[i, 72] else NA_real_,
-                      if (72 %in% obs) abs(pred[72] - datos[i, 72]) else NA_real_)
-    media_ajustada <- media_ajustada + pred
-    n_ajustadas <- n_ajustadas + 1
-  }
-  # Errores ponderados por el numero de observaciones
-  res <- data.frame(conjunto = conjunto, K = K, n_curvas = n_ajustadas,
-                    RMSE_ajuste = sqrt(sum(resumen[, "SSE"]) / sum(resumen[, "nobs"])),
-                    RMSE_VC = sqrt(sum(resumen[, "SCV"]) / sum(resumen[, "ncv"])),
-                    RMSE_VC_final = sqrt(sum(resumen[, "SCV_fin"]) / sum(resumen[, "ncv_fin"])),
-                    sesgo_P72 = mean(resumen[, "sesgo_P72"], na.rm = TRUE),
-                    MAE_P72 = mean(resumen[, "error_P72"], na.rm = TRUE))
-  list(resumen = res, media = media_ajustada / n_ajustadas)
-}
-
-# Comparacion de K en entrenamiento y validacion
-resultados <- list()
-medias_val <- matrix(NA_real_, 72, length(K_prueba), dimnames = list(NULL, paste0("K=", K_prueba)))
-for (j in seq_along(K_prueba)) {
-  K <- K_prueba[j]
-  Phi <- base_prueba(K)
-  pesos <- pesos_MCP(Y_train, Phi)
-  res_train <- evaluar_curvas(Y_train, Phi, pesos, "Entrenamiento 1981-1995", K)
-  res_val <- evaluar_curvas(Y_val, Phi, pesos, "Validacion 1996-2000", K)
-  resultados[[j]] <- rbind(res_train$resumen, res_val$resumen)
-  medias_val[, j] <- res_val$media
-}
-tabla_sensibilidad <- do.call(rbind, resultados)
-tabla_sensibilidad
-
-entrenamiento_K <- tabla_sensibilidad[grepl("Entrenamiento", tabla_sensibilidad$conjunto), ]
-validacion_K <- tabla_sensibilidad[grepl("Validacion", tabla_sensibilidad$conjunto), ]
-
-par(mfrow = c(1, 2), mar = c(4.3, 4.5, 3, 1))
-plot(entrenamiento_K$K, entrenamiento_K$RMSE_VC, type = "b", pch = 19,
-     xlab = "Numero de bases K", ylab = "RMSE de VC (mm)",
-     ylim = range(entrenamiento_K$RMSE_VC, validacion_K$RMSE_VC), main = "VC global: estacion")
-lines(validacion_K$K, validacion_K$RMSE_VC, type = "b", pch = 17, col = "steelblue")
-legend("topright", c("Entrenamiento", "Validacion"), col = c("black", "steelblue"),
-       lty = 1, pch = c(19, 17), bty = "n")
-plot(validacion_K$K, validacion_K$RMSE_VC_final, type = "b", pch = 19, col = "firebrick",
-     xlab = "Numero de bases K", ylab = "RMSE de VC (mm)", main = "VC final: pentadas 67-72")
-par(mfrow = c(1, 1))
-
-# Promedios finales de validacion
-prom_obs_val <- colMeans(Y_val, na.rm = TRUE)
-cols <- 58:72
-matplot(cols, medias_val[cols, , drop = FALSE], type = "l", lty = 1,
-        col = seq_along(K_prueba) + 1, lwd = 2, xlab = "Pentada", ylab = "Precipitacion (mm)",
-        main = "Sensibilidad del ajuste terrestre en diciembre")
-points(cols, prom_obs_val[cols], pch = 16)
-lines(cols, prom_obs_val[cols], lty = 2, lwd = 2)
-legend("topleft", c("Observado", colnames(medias_val)), lty = c(2, rep(1, length(K_prueba))),
-       pch = c(16, rep(NA, length(K_prueba))), col = c("black", seq_along(K_prueba) + 1), bty = "n", cex = 0.75)
-
-
 #################### Análisis exploratorio funcional ####################
 # Curvas de 1981 a 2003
 metadatos_eda <- metadatos_completos
@@ -1398,7 +1191,7 @@ coeficientes_eda <- list(terrestre = t(construccion_completa$terrestre$coeficien
 pares_eda <- colnames(coeficientes_eda$terrestre)[colSums(!is.finite(coeficientes_eda$terrestre)) == 0 &
                                                     colSums(!is.finite(coeficientes_eda$satelital)) == 0]
 metadatos_eda <- metadatos_eda[match(pares_eda, metadatos_eda$curva), ]
-cobertura_eda <- rbind(cobertura[, c("YEAR", "apto")], cobertura_prueba[, c("YEAR", "apto")]) %>%
+cobertura_eda <- cobertura[, c("YEAR", "apto")] %>%
   group_by(YEAR) %>%
   summarize(pares_aptos = sum(apto), .groups = "drop")
 cobertura_eda$pares_eda <- as.integer(table(factor(metadatos_eda$YEAR, levels = cobertura_eda$YEAR)))
@@ -1774,9 +1567,24 @@ lines(pentadas_eda, superior_diferencia_eda, lty = 2, col = "darkred")
 abline(h = 0, lty = 3)
 guardar_figura("05_exploratorio_diferencia_funcional.png", 12, 5)
 par(par_diferencia_eda)
+
+# Tramos del año donde la banda +- 2 EE no contiene el cero
+signo_banda <- ifelse(inferior_diferencia_eda > 0, 1, ifelse(superior_diferencia_eda < 0, -1, 0))
+tramos <- rle(signo_banda)
+fin_tramo <- cumsum(tramos$lengths)
+inicio_tramo <- fin_tramo - tramos$lengths + 1
+intervalos_diferencia_eda <- data.frame()
+for (k in which(tramos$values != 0)) {
+  idx <- inicio_tramo[k]:fin_tramo[k]
+  intervalos_diferencia_eda <- rbind(intervalos_diferencia_eda, data.frame(
+    inicio_pentada = pentadas_eda[inicio_tramo[k]], fin_pentada = pentadas_eda[fin_tramo[k]],
+    signo = ifelse(tramos$values[k] > 0, "Estacion mayor", "Satelite mayor"),
+    diferencia_min_mm = min(diferencia_media_eda[idx]), diferencia_max_mm = max(diferencia_media_eda[idx])))
+}
+intervalos_diferencia_eda
+guardar_tabla(intervalos_diferencia_eda, "05_exploratorio_intervalos_diferencia.csv")
 # La diferencia media es negativa cerca de ambos picos lluviosos
 # La banda de +- 2 EE es descriptiva porque hay estaciones repetidas y píxeles compartidos
-
 
 # Profundidad de Fraiman-Muniz y boxplot funcional con MBD
 profundidades_eda <- data.frame()
@@ -2660,15 +2468,19 @@ comparacion_regresion <- data.frame(
 comparacion_regresion
 guardar_tabla(comparacion_regresion, "06_regresion_comparacion.csv")
 
-# Funcion a funcion: R2 y superficie beta
-par(mfrow = c(1, 2))
+# Funcion a funcion: R2, superficie beta y correlacion de los residuos
+par(mfrow = c(1, 3))
 plot(tiempos, R2_linmod, type = "l", lwd = 2, xlab = "Pentada", ylab = expression(R^2), ylim = c(0, 1),
      main = expression(R^2 * "(t) en entrenamiento"))
 B1_regresion <- eval.bifd(puntos_medios, tiempos, ajuste_linmod$beta1estbifd)
 contour(puntos_medios, tiempos, B1_regresion, xlab = "s: pentada del satelite", ylab = "t: pentada de la estacion",
         main = expression(hat(beta)[1](s, t)), nlevels = 12)
 abline(0, 1, lty = 2, col = "red")
-guardar_figura("06_regresion_funcion_a_funcion.png", 11, 5)
+# Correlacion de los residuos entre pentadas (Hooker, 2010)
+residuos_linmod <- Y_entrenamiento - predecir_linmod(ajuste_linmod, idx_entrenamiento)
+contour(tiempos, tiempos, cor(t(residuos_linmod)), xlab = "Pentada (s)", ylab = "Pentada (t)",
+        main = "Correlacion de los residuos", nlevels = 10)
+guardar_figura("06_regresion_funcion_a_funcion.png", 15, 5)
 
 # Concurrente: coeficientes con bandas y R2
 nombres_beta <- c("Intercepto: beta_0(t)", "Satelite: beta_1(t)", "Altitud: beta_2(t)", "ONI: beta_3(t)")
@@ -2684,10 +2496,6 @@ plot(tiempos, R2_concurrente, type = "l", lwd = 2, ylim = c(0, 1), xlab = "Penta
      main = "R2(t) en entrenamiento")
 lines(tiempos, R2_linmod, lwd = 2, lty = 2, col = "blue")
 legend("bottomright", c("Concurrente", "Funcion a funcion"), lty = c(1, 2), col = c("black", "blue"), bty = "n")
-# Correlacion de los residuos entre pentadas (Hooker, 2010)
-contour(malla_regresion[seq(1, 721, 10)], malla_regresion[seq(1, 721, 10)],
-        cor(t(residuos_malla[seq(1, 721, 10), ])), xlab = "Pentada (s)", ylab = "Pentada (t)",
-        main = "Correlacion de los residuos", nlevels = 10)
 guardar_figura("06_regresion_concurrente.png", 11, 6.5)
 
 # Error por pentada en validacion
@@ -2719,7 +2527,6 @@ nombres_pentadas <- paste0("P", sprintf("%02d", tiempos))
 metadatos_python <- metadatos_eda[, c("curva", "STATION_ID", "YEAR", "longitud", "latitud", "pixel",
                                       "altitud", "altitud_completa", "fuente_altitud")]
 metadatos_python$particion <- particion_curva(metadatos_python$STATION_ID, metadatos_python$YEAR)
-# Solo se exportan las curvas que entran al modelo
 pares_modelo <- metadatos_python$curva[metadatos_python$particion != "sin_uso"]
 metadatos_python <- merge(metadatos_python, oni_anual, by = "YEAR", all.x = TRUE)
 metadatos_python <- metadatos_python[match(pares_modelo, metadatos_python$curva), ]
