@@ -10,6 +10,8 @@ SEMILLAS = (1, 2, 3)
 # Penalización de rugosidad fija para todas las ablaciones
 LAMBDA = 100.0
 EPOCAS, PACIENCIA, TASA = 3000, 200, 0.01
+# Validación cruzada con los 5 grupos de estaciones de entrenamiento exportados desde R (columna grupo_vc)
+GRUPOS = Mo.GRUPOS_VC
 # Pentadas de cada temporada de lluvias para ubicar los dos picos (marzo-junio y septiembre-diciembre)
 TEMPORADAS = ((13, 36), (49, 72))
 # Resultados intermedios: cada etapa guarda un CSV y los modelos finales un .pt;
@@ -38,13 +40,16 @@ def bspline(t, a, b, K, orden=4):
 
 
 # Datos de la red (raíz después de suavizar), lluvia observada, formas del ONI y referencias
+# tr: curvas de entrenamiento; va: curvas donde se miden las métricas, que son las mismas de entrenamiento,
+# cada una con la predicción del modelo ajustado sin su grupo (validación cruzada). La prueba no se usa
 def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
     carpeta_curvas, carpeta_datos = Path(carpeta_curvas), Path(carpeta_datos)
     datos = Mo.cargar_datos_red(carpeta_curvas, 'raiz')
     meta = datos['meta']
-    tr, va = datos['particion'] == 'entrenamiento', datos['particion'] == 'validacion'
+    tr = datos['particion'] == 'entrenamiento'
+    va = tr.copy()
     t_fina, filas = datos['t'], datos['filas_pentadas']
-    D = dict(datos=datos, meta=meta, tr=tr, va=va, t_fina=t_fina, filas=filas,
+    D = dict(datos=datos, meta=meta, tr=tr, va=va, grupo=datos['grupo_vc'], t_fina=t_fina, filas=filas,
              phi_s_f=datos['phi_sat'], phi_e_f=datos['phi_est'],
              phi_s=datos['phi_sat'][filas], phi_e=datos['phi_est'][filas])
     D['W_s'], D['R_s'] = Mo.matrices_integracion(t_fina, D['phi_s_f'])
@@ -57,7 +62,7 @@ def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
     D['satelite_mm'] = np.maximum(leer('coeficientes_satelite.csv')[va] @ D['phi_s_f'].T, 0)
     D['referencia'] = D['estacion_mm'][:, filas]
     D['satelite_pent'] = D['satelite_mm'][:, filas]
-    # Climatología: curva media de las estaciones de entrenamiento
+    # Climatología: curva media de todas las curvas de entrenamiento
     D['climatologia_fina'] = estaciones_mm[tr].mean(0)
     D['climatologia'] = D['climatologia_fina'][filas]
     D['curvas_va'] = meta.curva[va].to_numpy()
@@ -71,15 +76,15 @@ def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
     D['c_oni'] = np.linalg.lstsq(bspline(D['t_meses'], 0, 72, 6), D['oni_meses'].T, rcond=None)[0].T
     D['W_o'], D['R_o'] = Mo.matrices_integracion(t_fina, D['phi_o_f'])
     D['fase_def'] = enso[enso.mes_central == 1].set_index('YEAR').fase_enso.loc[meta.YEAR[va]].to_numpy()
-    estandarizar = lambda x: (x - x[tr].mean(0)) / x[tr].std(0)
+    # Covariables sin estandarizar; se estandarizan en cada grupo con sus curvas de ajuste
     D['altitud'] = meta.altitud_completa.to_numpy(float)
     D['covariables'] = {
-        'promedio anual': estandarizar(np.c_[D['altitud'], meta.oni_promedio.to_numpy(float)]),
-        'máximo': estandarizar(np.c_[D['altitud'], meta.oni_max_intensidad.to_numpy(float)]),
-        'DEF': estandarizar(np.c_[D['altitud'], tabla.loc[meta.YEAR, 1].to_numpy(float)]),
-        'curva': estandarizar(D['altitud'][:, None]),
+        'promedio anual': np.c_[D['altitud'], meta.oni_promedio.to_numpy(float)],
+        'máximo': np.c_[D['altitud'], meta.oni_max_intensidad.to_numpy(float)],
+        'DEF': np.c_[D['altitud'], tabla.loc[meta.YEAR, 1].to_numpy(float)],
+        'curva': D['altitud'][:, None],
     }
-    # Prediccion de la regresion funcional funcion a funcion del script de R (la referencia de la red)
+    # Prediccion de validacion cruzada de la regresion funcion a funcion del script de R (mismos grupos)
     reg = pd.read_csv(carpeta_curvas / 'regresion_funcional_predicciones.csv', dtype={'curva': str})
     reg = reg[reg.modelo == 'Funcion a funcion']
     D['regresion'] = {'Funcion a funcion': reg.set_index('curva').loc[D['curvas_va']].drop(columns='modelo').to_numpy(float)}
@@ -138,49 +143,70 @@ def construir_red(D, cabeza, q, m, oni='promedio anual', anchos=(2,), intervalos
     ocultas = ocultas_igualadas(q + qo + n_esc, m, anchos, intervalos) if cabeza == 'MLP' else None
     return Red(D, cabeza, q, m, n_esc, anchos, intervalos, qo, ocultas)
 
-# FPCA de las curvas de estaciones de entrenamiento, con puntajes escalados por su desviación
-def fpca_estaciones(D, m):
+# FPCA de las curvas de estaciones de ajuste, con puntajes escalados por su desviación
+def fpca_estaciones(D, m, ajuste):
     curvas = D['datos']['c_est'] @ D['phi_e'].T
-    fp = Mo.fit_fpca(curvas[D['tr']], m)
-    sd = ((curvas[D['tr']] - fp['media']) @ fp['base'].T).std(0)
+    fp = Mo.fit_fpca(curvas[ajuste], m)
+    sd = ((curvas[ajuste] - fp['media']) @ fp['base'].T).std(0)
     return fp, dict(fp, base=fp['base'] * sd[:, None]), sd
 
-def argumentos(D, idx, oni):
-    return T(D['datos']['c_sat'][idx]), T(D['c_oni'][idx]), T(D['covariables'][oni][idx])
+# Curvas de ajuste y de validación de cada grupo
+def curvas_grupo(D, grupo):
+    return D['tr'] & (D['grupo'] != grupo), D['tr'] & (D['grupo'] == grupo)
 
-# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L2 de validación
-def entrenar(D, cabeza, q, m, semilla, oni='promedio anual', anchos=(2,), intervalos=12, q_oni=2):
-    tr, va = D['tr'], D['va']
+# Entradas de la red; las covariables se estandarizan con las curvas de ajuste del grupo
+def argumentos(D, idx, oni, ajuste):
+    x = D['covariables'][oni]
+    x = (x - x[ajuste].mean(0)) / x[ajuste].std(0)
+    return T(D['datos']['c_sat'][idx]), T(D['c_oni'][idx]), T(x[idx])
+
+# Entrenamiento de un grupo con lote completo, AdamW y parada temprana con la pérdida L2 del grupo que queda fuera
+def entrenar_grupo(D, grupo, cabeza, q, m, semilla, oni, anchos, intervalos, q_oni):
+    tr, va = curvas_grupo(D, grupo)
     c_obj = D['datos']['c_est']
-    fp, fp_n, _ = fpca_estaciones(D, m)
+    _, fp_n, _ = fpca_estaciones(D, m, tr)
     mu_c, psi_c, _ = Mo.coeficientes_fpca(fp_n, D['phi_e'])
     Mo.establecer_semilla(semilla)
     red = construir_red(D, cabeza, q, m, oni, anchos, intervalos, q_oni)
-    if cabeza == 'KAN': red.calibrar(*argumentos(D, tr, oni))
+    x_tr, x_va = argumentos(D, tr, oni, tr), argumentos(D, va, oni, tr)
+    if cabeza == 'KAN': red.calibrar(*x_tr)
     perdida = Mo.PerdidaFuncional(D['W_e'], mu_c, psi_c, LAMBDA)
     opt = torch.optim.AdamW(red.parameters(), lr=TASA, weight_decay=0)
     y_tr, y_va = T(c_obj[tr]), T(c_obj[va])
     mejor, ep_m, estado, sin = np.inf, 0, None, 0
     for ep in range(1, EPOCAS + 1):
         opt.zero_grad(set_to_none=True)
-        perdida(red(*argumentos(D, tr, oni)), y_tr, red).backward(); opt.step()
-        with torch.no_grad(): v = perdida.error_l2(red(*argumentos(D, va, oni)), y_va).item()
+        perdida(red(*x_tr), y_tr, red).backward(); opt.step()
+        with torch.no_grad(): v = perdida.error_l2(red(*x_va), y_va).item()
         if v < mejor - 1e-10:
             mejor, ep_m, sin = v, ep, 0; estado = {k: w.clone() for k, w in red.state_dict().items()}
         else:
             sin += 1
             if sin >= PACIENCIA: break
     red.load_state_dict(estado)
-    with torch.no_grad(): c_hat = perdida.coeficientes(red(*argumentos(D, va, oni))).numpy()
-    return red, c_hat, dict(L2_validacion=mejor, epoca=ep_m, parametros_cabeza=sum(p.numel() for p in red.cabeza.parameters()),
-                            varianza_explicada=fp['explicada'][:m].sum())
+    with torch.no_grad(): c_hat = perdida.coeficientes(red(*x_va)).numpy()
+    return red, c_hat, mejor, ep_m
+
+# Validación cruzada de una configuración: una red por grupo y la predicción de cada curva de entrenamiento
+# hecha por la red que no la vio. L2_validacion es la pérdida media de las curvas que quedan fuera
+def entrenar(D, cabeza, q, m, semilla, oni='promedio anual', anchos=(2,), intervalos=12, q_oni=2):
+    c_hat = np.full(D['datos']['c_est'].shape, np.nan)
+    redes, perdidas, curvas, epocas = [], [], [], []
+    for grupo in range(1, GRUPOS + 1):
+        red, c_g, mejor, ep = entrenar_grupo(D, grupo, cabeza, q, m, semilla, oni, anchos, intervalos, q_oni)
+        c_hat[curvas_grupo(D, grupo)[1]] = c_g
+        redes.append(red); perdidas.append(mejor); curvas.append(len(c_g)); epocas.append(ep)
+    fp = fpca_estaciones(D, m, D['tr'])[0]
+    return redes, c_hat[D['va']], dict(L2_validacion=np.average(perdidas, weights=curvas), epoca=np.median(epocas),
+                                       parametros_cabeza=sum(p.numel() for p in redes[0].cabeza.parameters()),
+                                       varianza_explicada=fp['explicada'][:m].sum())
 
 # Coeficientes en la escala del modelo -> curva en mm (recortada en 0) en las 72 pentadas y en la malla fina
 def a_mm(D, c_hat):
     return np.maximum(c_hat @ D['phi_e'].T, 0)**2, np.maximum(c_hat @ D['phi_e_f'].T, 0)**2
 
 
-# Métricas en validación frente a la curva suavizada de la estación: RECM y sesgo del acumulado en las 72 péntadas;
+# Métricas de validación cruzada frente a la curva suavizada de la estación: RECM y sesgo del acumulado en las 72 péntadas;
 # L2 relativo, KGE y fecha de los picos en la malla fina
 def metricas(D, pred_pent, pred_fina=None):
     ref_p = D['referencia']
@@ -206,25 +232,28 @@ def referencias(D):
 
 
 # Cambio relativo de los coeficientes del codificador respecto a su inicialización y fracción de entradas
-# de entrenamiento fuera del soporte de las B-splines (promedio de las capas de la KAN)
+# de ajuste fuera del soporte de las B-splines (promedio de las capas de la KAN y de las redes de los 5 grupos)
 @torch.no_grad()
-def diagnostico_codificador(D, red, cabeza, q, m, semilla, oni='promedio anual', anchos=(2,), intervalos=12):
+def diagnostico_codificador(D, redes, cabeza, q, m, semilla, oni='promedio anual', anchos=(2,), intervalos=12):
     Mo.establecer_semilla(semilla)
     A0 = construir_red(D, cabeza, q, m, oni, anchos, intervalos).sat.A
-    cambio = float((red.sat.A - A0).norm() / A0.norm())
-    if not red.es_kan: return cambio, np.nan
-    h, fuera = red.entradas(*argumentos(D, D['tr'], oni)), []
-    for capa in red.cabeza:
-        u = (h - capa.centro) / capa.escala
-        fuera.append(float((u.abs() > 1 + 6 / capa.intervalos).double().mean())); h = capa(h)
+    cambio = float(np.mean([(red.sat.A - A0).norm() / A0.norm() for red in redes]))
+    if not redes[0].es_kan: return cambio, np.nan
+    fuera = []
+    for grupo, red in enumerate(redes, 1):
+        tr = curvas_grupo(D, grupo)[0]
+        h = red.entradas(*argumentos(D, tr, oni, tr))
+        for capa in red.cabeza:
+            u = (h - capa.centro) / capa.escala
+            fuera.append(float((u.abs() > 1 + 6 / capa.intervalos).double().mean())); h = capa(h)
     return cambio, float(np.mean(fuera))
 
 # Arquitecturas candidatas de la KAN con 3 semillas: métricas, cambio del codificador y entradas fuera del soporte
 def diagnostico_arquitecturas(D, registros, candidatos, q, m):
     for anchos, intervalos in candidatos:
         for s in SEMILLAS:
-            red, c_hat, info = entrenar(D, 'KAN', q, m, s, anchos=anchos, intervalos=intervalos)
-            cambio, fuera = diagnostico_codificador(D, red, 'KAN', q, m, s, anchos=anchos, intervalos=intervalos)
+            redes, c_hat, info = entrenar(D, 'KAN', q, m, s, anchos=anchos, intervalos=intervalos)
+            cambio, fuera = diagnostico_codificador(D, redes, 'KAN', q, m, s, anchos=anchos, intervalos=intervalos)
             registros.append(dict(anchos=str(anchos), intervalos=intervalos, semilla=s, **info, cambio_codificador=cambio,
                                   fuera_soporte=fuera, **metricas(D, *a_mm(D, c_hat))))
 
@@ -242,16 +271,19 @@ def etapa(nombre, funcion):
     registros = []; funcion(registros)
     df = pd.DataFrame(registros); df.to_csv(archivo, index=False); return df
 
-# Modelo persistente: pesos y predicción de validación en un .pt
+# Modelo persistente: pesos de las redes de los 5 grupos y predicción de validación cruzada en un .pt
 def red_guardada(D, nombre, cabeza, q, m, semilla, **kw):
     archivo = RESULTADOS / f'{nombre}.pt'
     if archivo.exists():
         d = torch.load(archivo, weights_only=False)
-        red = construir_red(D, cabeza, q, m, **kw); red.load_state_dict(d['estado']); return red, d['c_hat']
-    red, c_hat, _ = entrenar(D, cabeza, q, m, semilla, **kw)
-    torch.save({'estado': red.state_dict(), 'c_hat': c_hat}, archivo); return red, c_hat
+        redes = []
+        for estado in d['estados']:
+            red = construir_red(D, cabeza, q, m, **kw); red.load_state_dict(estado); redes.append(red)
+        return redes, d['c_hat']
+    redes, c_hat, _ = entrenar(D, cabeza, q, m, semilla, **kw)
+    torch.save({'estados': [red.state_dict() for red in redes], 'c_hat': c_hat}, archivo); return redes, c_hat
 
-# Media de 3 semillas de la configuración: modelo de la primera semilla y predicción promedio en mm
+# Media de 3 semillas de la configuración: redes de la primera semilla y predicción promedio en mm
 def modelo_final(D, nombre, cabeza, cfg, oni):
     cfg = dict(cfg); q, m = cfg.pop('q'), cfg.pop('M')
     preds, redes = [], []
@@ -295,7 +327,7 @@ def grafica_q_M(e1, referencia):
                 ax.text(j, i, f'{tabla.iat[i, j]:.2f}', ha='center', va='center', fontsize=8,
                         color='k' if tabla.iat[i, j] < mitad else 'w')
     axes[0].set_ylabel('q')
-    fig.colorbar(im, ax=axes, label=f'RECM en validación (mm); satélite = {referencia:.2f}')
+    fig.colorbar(im, ax=axes, label=f'RECM de validación cruzada (mm); satélite = {referencia:.2f}')
     return fig
 
 def grafica_arquitectura_kan(e2, referencia, titulo):
@@ -305,7 +337,7 @@ def grafica_arquitectura_kan(e2, referencia, titulo):
         ax.errorbar(range(len(s)), s['mean'], s['std'], marker='o', capsize=3, label=f'{int(iv)} intervalos')
     ax.set_xticks(range(len(s))); ax.set_xticklabels(s.index)
     ax.axhline(referencia, ls='--', c='grey', label='Satélite sin corregir')
-    ax.set(xlabel='Capas ocultas de la KAN', ylabel='RECM validación (mm)', title=titulo); ax.legend(frameon=False)
+    ax.set(xlabel='Capas ocultas de la KAN', ylabel='RECM validación cruzada (mm)', title=titulo); ax.legend(frameon=False)
     return fig
 
 def grafica_pesos_oni(D, red):
@@ -313,7 +345,7 @@ def grafica_pesos_oni(D, red):
     fig, ax = plt.subplots(figsize=(7, 3.2))
     for k in range(w.shape[1]): ax.plot(D['t_fina'], w[:, k], lw=2, label=f'$w^{{ONI}}_{k+1}(t)$')
     ax.axhline(0, c='k', lw=.5)
-    ax.set(xlabel='Péntada (mes central de la ventana ONI)', ylabel='peso', title='Funciones de pesos del ONI (KAN)')
+    ax.set(xlabel='Péntada (mes central de la ventana ONI)', ylabel='peso', title='Funciones de pesos del ONI (KAN, grupo 1)')
     ax.legend(frameon=False)
     return fig
 
@@ -326,7 +358,7 @@ def grafica_media_sesgo(D, predicciones):
         axes[0].plot(t, p[0].mean(0), c=COLORES.get(nombre), label=nombre)
         axes[1].plot(t, 100 * (p[0].mean(0) / m_obs - 1), c=COLORES.get(nombre), label=nombre)
     axes[1].plot(t, 100 * (np.nanmean(D['satelite_pent'], 0) / m_obs - 1), c=COLORES['Satélite'], label='Satélite')
-    axes[0].set(xlabel='Péntada', ylabel='mm', title='Media en validación'); axes[0].legend(frameon=False)
+    axes[0].set(xlabel='Péntada', ylabel='mm', title='Media en validación cruzada'); axes[0].legend(frameon=False)
     axes[1].axhline(0, c='k', lw=.5); axes[1].set(xlabel='Péntada', ylabel='%', title='Sesgo por péntada'); axes[1].legend(frameon=False)
     return fig
 
@@ -350,7 +382,7 @@ def grafica_mapa_residuos(D, prediccion, titulo):
     fig, ax = plt.subplots(figsize=(12, 5))
     limite = np.percentile(np.abs(res), 98)
     im = ax.imshow(res[orden], aspect='auto', cmap='RdBu_r', vmin=-limite, vmax=limite, interpolation='nearest')
-    ax.set(xlabel='Péntada', ylabel='Curvas de validación (por altitud, de menor a mayor)', title=titulo)
+    ax.set(xlabel='Péntada', ylabel='Curvas de entrenamiento (por altitud, de menor a mayor)', title=titulo)
     fig.colorbar(im, ax=ax, label='predicho - estación (mm)')
     return fig
 

@@ -21,11 +21,13 @@ INTERVALOS_KAN = 12
 ESCALA = 'raiz'
 # Componentes del decodificador FPCA (M = 5 explica el 96 % de la varianza)
 COMPONENTES_RED = (5,)
-# Malla de lambda para la penalización de rugosidad; se elige por validación
+# Malla de lambda para la penalización de rugosidad; se elige por validación cruzada
 LAMBDAS_RUGOSIDAD = (1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3, 1e4)
 EPOCAS_MAXIMAS = 3000
 PACIENCIA = 200
 TASA_APRENDIZAJE = 0.01
+# Grupos de la validación cruzada por estaciones (columna grupo_vc exportada desde R)
+GRUPOS_VC = 5
 
 
 # Datos exportados desde R
@@ -46,14 +48,17 @@ def cargar_datos(carpeta='Curvas'):
     if len(k_sat) != 1 or len(k_est) != 1 or int(k_sat.iloc[0].K) != len(columnas) or int(k_sat.iloc[0].orden) != 4:
         raise ValueError('Parámetros de construcción incompatibles con la exportación R.')
     datos = meta.merge(coefs, on='curva', validate='one_to_one', sort=False)
-    requeridas = ('altitud_completa', 'oni_promedio', 'particion', 'YEAR')
+    requeridas = ('altitud_completa', 'oni_promedio', 'particion', 'YEAR', 'grupo_vc')
     if any(c not in datos for c in requeridas): raise ValueError(f'Faltan columnas: {requeridas}')
     anios = datos.YEAR.to_numpy(); particion = datos.particion.to_numpy()
-    esperada = np.where(anios <= 1995, 'entrenamiento', np.where(anios <= 2000, 'validacion', 'prueba'))
+    esperada = np.where(anios <= 1997, 'entrenamiento', 'prueba')
     if np.any((anios < 1981) | (anios > 2003)) or np.any(particion != esperada):
-        raise ValueError('Particiones incorrectas: 1981-95 / 1996-2000 / 2001-03.')
+        raise ValueError('Particiones incorrectas: 1981-1997 / 1998-2003.')
     if datos.groupby('STATION_ID').particion.nunique().max() > 1:
         raise ValueError('Hay estaciones en más de un conjunto: la partición debe ser por estaciones.')
+    grupos = datos.loc[datos.particion == 'entrenamiento', ['STATION_ID', 'grupo_vc']]
+    if set(grupos.grupo_vc) != set(range(1, GRUPOS_VC + 1)) or grupos.groupby('STATION_ID').grupo_vc.nunique().max() > 1:
+        raise ValueError(f'Cada estación de entrenamiento debe estar en un solo grupo de 1 a {GRUPOS_VC}.')
     c = datos[columnas].to_numpy(dtype=np.float64)
     cov = datos[['altitud_completa', 'oni_promedio']].to_numpy(dtype=np.float64)
     t = base.t.to_numpy(dtype=np.float64); phi = base[columnas].to_numpy(dtype=np.float64)
@@ -72,8 +77,10 @@ def matrices_integracion(t, phi):
 
 # Estandarización ajustada solo con entrenamiento
 class NormalizadorCovariables:
+    # particion puede ser la columna de partición o una máscara de las curvas de ajuste
     def ajustar(self, cov, particion):
-        train = cov[np.asarray(particion) == 'entrenamiento']
+        filas = np.asarray(particion)
+        train = cov[filas if filas.dtype == bool else filas == 'entrenamiento']
         if len(train) == 0: raise ValueError('No hay curvas de entrenamiento.')
         self.media = train.mean(axis=0); self.desviacion = np.maximum(train.std(axis=0), 1e-12)
         return self
@@ -349,16 +356,15 @@ def coeficientes_fpca(fpca, phi):
     error = max(np.abs(phi @ mu_c - fpca['media']).max(), np.abs(psi_c @ phi.T - fpca['base']).max())
     return mu_c, psi_c, error
 
-# Varianza explicada y piso de reconstruccion en validacion para cada M
+# Varianza explicada y piso de reconstruccion en entrenamiento para cada M
 def tabla_componentes(curvas, fpca):
     entrenamiento = curvas['y'][curvas['particion'] == 'entrenamiento']
-    validacion = curvas['y'][curvas['particion'] == 'validacion']
     filas = []
     for m in range(1, fpca['base'].shape[0] + 1):
         psi = fpca['base'][:m]
-        reconstruida = fpca['media'] + (validacion - fpca['media']) @ psi.T @ psi
+        reconstruida = fpca['media'] + (entrenamiento - fpca['media']) @ psi.T @ psi
         filas.append({'M': m, 'varianza_explicada_acumulada': fpca['explicada'][:m].sum(),
-                      'piso_RMSE_validacion_mm': np.sqrt(np.mean((reconstruida - validacion)**2))})
+                      'piso_RMSE_entrenamiento_mm': np.sqrt(np.mean((reconstruida - entrenamiento)**2))})
     return pd.DataFrame(filas), len(entrenamiento)
 
 
@@ -382,7 +388,7 @@ def cargar_datos_red(carpeta='Curvas', escala='raiz'):
     filas = [int(np.argmin(np.abs(t - k))) for k in range(1, 73)]
     phi_sat = base_s.drop(columns='t').to_numpy(dtype=np.float64)
     phi_est = base_e.drop(columns='t').to_numpy(dtype=np.float64)
-    return {'meta': meta, 'particion': meta.particion.to_numpy(),
+    return {'meta': meta, 'particion': meta.particion.to_numpy(), 'grupo_vc': meta.grupo_vc.to_numpy(),
             'cov': meta[['altitud_completa', 'oni_promedio']].to_numpy(dtype=np.float64),
             'c_sat': coeficientes_en_escala(coeficientes('coeficientes_satelite.csv'), phi_sat, escala),
             'c_est': coeficientes_en_escala(coeficientes('coeficientes_estaciones.csv'), phi_est, escala),
@@ -401,13 +407,14 @@ def crear_modelo(cabeza, gram, rugosidad, q, m):
     if cabeza == 'KAN': return ModeloCodificadorCabezaKAN(gram, rugosidad, q, m)
     raise ValueError('Cabezas permitidas: lineal, MLP y KAN.')
 
-# FPCA de las curvas de estaciones de entrenamiento en las 72 pentadas
+# FPCA de las curvas de estaciones de ajuste en las 72 pentadas (por defecto, todo el entrenamiento)
 # Los puntajes se escalan por su desviación estándar para que las M salidas de la cabeza tengan magnitud similar;
 # el decodificador multiplica de nuevo por esa desviación, así que la curva reconstruida es la misma
-def preparar_fpca(datos, m):
+def preparar_fpca(datos, m, filas=None):
+    if filas is None: filas = datos['particion'] == 'entrenamiento'
     phi = datos['phi_est'][datos['filas_pentadas']]
     curvas = datos['c_est'] @ phi.T
-    entrenamiento = curvas[datos['particion'] == 'entrenamiento']
+    entrenamiento = curvas[filas]
     fpca = fit_fpca(entrenamiento, m)
     desviacion = ((entrenamiento - fpca['media']) @ fpca['base'].T).std(axis=0)
     fpca_escalada = dict(fpca, base=fpca['base'] * desviacion[:, None])
@@ -437,15 +444,16 @@ def metricas_mm(c_hat, filas, datos, escala):
     l2 = np.mean(np.sqrt(np.trapezoid((pred - ref)**2, t, axis=1) / np.trapezoid(ref**2, t, axis=1)))
     return recm, l2
 
-# Entrenamiento con lote completo, AdamW y parada temprana con la pérdida L2 de validación
-# La validación se evalúa en cada época; se guarda el estado con menor pérdida de validación
-# Con con_metricas=True también se guardan por época la RECM y el L2 relativo de entrenamiento y validación
-def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e, fpca, mu_c, psi_c, cov_norm,
+# Entrenamiento con lote completo y AdamW
+# tr y va son máscaras de las curvas de ajuste y de validación (en la validación cruzada, el grupo que queda fuera)
+# Con va: parada temprana con la pérdida L2 de validación y se guarda el estado con menor pérdida
+# Sin va (ajuste final): se entrena el número fijo de épocas y se guarda el último estado
+# Con con_metricas=True también se guardan por época la RECM y el L2 relativo de ajuste y validación
+def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e, fpca, mu_c, psi_c, cov_norm, tr, va=None,
                  epocas=EPOCAS_MAXIMAS, paciencia=PACIENCIA, con_metricas=False, escala=ESCALA):
     T = lambda x: torch.as_tensor(x, dtype=torch.float64)
-    tr, va = datos['particion'] == 'entrenamiento', datos['particion'] == 'validacion'
     c_tr, h_tr, y_tr = T(datos['c_sat'][tr]), T(cov_norm[tr]), T(datos['c_est'][tr])
-    c_va, h_va, y_va = T(datos['c_sat'][va]), T(cov_norm[va]), T(datos['c_est'][va])
+    if va is not None: c_va, h_va, y_va = T(datos['c_sat'][va]), T(cov_norm[va]), T(datos['c_est'][va])
     establecer_semilla(semilla)
     modelo = crear_modelo(cabeza, gram_s, rugosidad_s, q, m)
     if cabeza == 'KAN':
@@ -459,23 +467,30 @@ def entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e,
         valor = perdida(modelo(c_tr, h_tr), y_tr, modelo.codificador)
         valor.backward(); optimizador.step()
         modelo.eval()
-        with torch.no_grad(): validacion = perdida.error_l2(modelo(c_va, h_va), y_va).item()
+        validacion = np.nan
+        if va is not None:
+            with torch.no_grad(): validacion = perdida.error_l2(modelo(c_va, h_va), y_va).item()
         fila = [epoca, valor.item(), validacion]
         if con_metricas:
             with torch.no_grad():
                 salida_tr = modelo(c_tr, h_tr)
                 fila.append(perdida.error_l2(salida_tr, y_tr).item())
                 fila += metricas_mm(perdida.coeficientes(salida_tr).numpy(), tr, datos, escala)
-                fila += metricas_mm(perdida.coeficientes(modelo(c_va, h_va)).numpy(), va, datos, escala)
+                if va is not None: fila += metricas_mm(perdida.coeficientes(modelo(c_va, h_va)).numpy(), va, datos, escala)
+                else: fila += [np.nan, np.nan]
         historia.append(tuple(fila))
-        if validacion < mejor - 1e-10:
+        if va is None:
+            mejor_epoca = epoca
+            mejor_estado = {k: v.detach().clone() for k, v in modelo.state_dict().items()}
+        elif validacion < mejor - 1e-10:
             mejor, mejor_epoca, sin_mejora = validacion, epoca, 0
             mejor_estado = {k: v.detach().clone() for k, v in modelo.state_dict().items()}
         else:
             sin_mejora += 1
             if sin_mejora >= paciencia: break
     modelo.load_state_dict(mejor_estado)
-    return modelo, perdida, {'perdida_validacion': mejor, 'mejor_epoca': mejor_epoca, 'epocas': epoca,
+    return modelo, perdida, {'perdida_validacion': mejor if va is not None else np.nan, 'mejor_epoca': mejor_epoca,
+                             'epocas': epoca,
                              'parametros_cabeza': contar_parametros(modelo.cabeza),
                              'parametros_codificador': contar_parametros(modelo.codificador)}, historia
 
@@ -512,7 +527,7 @@ def main_cabeza_lineal(opciones=()):
     if np.linalg.eigvalsh(W).min() <= 0: raise AssertionError('Gram no es definida positiva.')
     normalizador = NormalizadorCovariables().ajustar(datos['cov'], datos['particion'])
     cov_norm = normalizador.transformar(datos['cov'])
-    for nombre in ('entrenamiento', 'validacion', 'prueba'):
+    for nombre in ('entrenamiento', 'prueba'):
         print(f'{nombre}: {(datos["particion"] == nombre).sum()} curvas')
     print(f'Bases: satélite={W.shape[0]}, estaciones={datos["k_est"]}; Gram simétrica={np.allclose(W, W.T)}')
     print(f'Semillas: {", ".join(f"{s:04d}" for s in SEMILLAS)}')
@@ -574,7 +589,7 @@ def main_decodificador(opciones=()):
     fpca = fit_fpca(entrenamiento, curvas['phi'].shape[1])
     tabla, n_entrenamiento = tabla_componentes(curvas, fpca)
     mu_c, psi_c, error_base = coeficientes_fpca(fpca, curvas['phi'])
-    print(f'FPCA con {n_entrenamiento} curvas de entrenamiento (1981-1995)')
+    print(f'FPCA con {n_entrenamiento} curvas de entrenamiento (1981-1997)')
     print(tabla.round(4).to_string(index=False))
     print(f'Diferencia máxima al pasar mu y psi a la base de estaciones: {error_base:.2e}')
 
@@ -611,7 +626,7 @@ def grafica_sedimentacion(explicada, m_elegido, archivo):
     fig.tight_layout(); fig.savefig(archivo, dpi=150); plt.close(fig)
 
 
-# Historial por época de la configuración elegida de cada cabeza (mismas semillas, mismos modelos)
+# Historial por época del ajuste final de cada cabeza (mismas semillas y épocas que los modelos guardados)
 COLUMNAS_HISTORIAL = ['epoca', 'perdida_entrenamiento', 'L2_validacion', 'L2_entrenamiento',
                       'RECM_entrenamiento', 'L2_relativo_entrenamiento', 'RECM_validacion', 'L2_relativo_validacion']
 
@@ -619,26 +634,27 @@ def historial_entrenamiento(escala=ESCALA, carpeta='Curvas', semillas=SEMILLAS, 
     datos = cargar_datos_red(carpeta, escala)
     gram_s, rugosidad_s = matrices_integracion(datos['t'], datos['phi_sat'])
     gram_e, _ = matrices_integracion(datos['t'], datos['phi_est'])
-    cov_norm = NormalizadorCovariables().ajustar(datos['cov'], datos['particion']).transformar(datos['cov'])
+    tr = datos['particion'] == 'entrenamiento'
+    cov_norm = NormalizadorCovariables().ajustar(datos['cov'], tr).transformar(datos['cov'])
     elegidas = pd.read_csv(f'Tablas/{prefijo}_configuracion_elegida.csv').set_index('cabeza')
     filas = []
     for cabeza in ('lineal', 'MLP', 'KAN'):
         q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), float(elegidas.loc[cabeza, 'lambda'])
+        epocas = int(elegidas.loc[cabeza, 'epocas_finales'])
         fpca, mu_c, psi_c, _ = preparar_fpca(datos, m)
         for semilla in semillas:
             _, _, resumen, historia = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e,
-                                                   fpca, mu_c, psi_c, cov_norm, con_metricas=True, escala=escala)
+                                                   fpca, mu_c, psi_c, cov_norm, tr, None, epocas,
+                                                   con_metricas=True, escala=escala)
             for h in historia:
                 filas.append({'cabeza': cabeza, 'semilla': semilla, **dict(zip(COLUMNAS_HISTORIAL, h)),
                               'mejor_epoca': resumen['mejor_epoca']})
-            print(f'{cabeza} semilla={semilla:04d}: mejor época {resumen["mejor_epoca"]}, '
-                  f'validación={resumen["perdida_validacion"]:.4f}', flush=True)
+            print(f'{cabeza} semilla={semilla:04d}: {resumen["mejor_epoca"]} épocas', flush=True)
     tabla = pd.DataFrame(filas)
     tabla.to_csv(f'Tablas/{prefijo}_historial_entrenamiento.csv', index=False)
     return tabla
 
-# Pérdida y métricas por época: una fila por cabeza, entrenamiento en azul y validación en naranja
-# Cada curva llega hasta la época que se guarda (menor pérdida de validación)
+# Pérdida y métricas por época: una fila por cabeza, entrenamiento en azul y validación en naranja si la hay
 # Eje y en escala log porque las primeras épocas tienen errores muy grandes
 def grafica_historial(tabla, archivo):
     import matplotlib.pyplot as plt
@@ -654,24 +670,31 @@ def grafica_historial(tabla, archivo):
             for k, (semilla, g) in enumerate(sub.groupby('semilla')):
                 g = g[g.epoca <= g.mejor_epoca]
                 ax.plot(g.epoca, g[col_tr], color='#1f77b4', lw=1, alpha=0.8, label='Entrenamiento' if k == 0 else None)
-                ax.plot(g.epoca, g[col_va], color='#ff7f0e', lw=1, alpha=0.8, label='Validación' if k == 0 else None)
+                if g[col_va].notna().any():
+                    ax.plot(g.epoca, g[col_va], color='#ff7f0e', lw=1, alpha=0.8, label='Validación' if k == 0 else None)
             ax.set_yscale('log')
             ax.set_title(f'{cabeza}: {titulo}', fontsize=10)
             if i == len(cabezas) - 1: ax.set_xlabel('Época')
             if i == 0 and j == 0: ax.legend(fontsize=8)
-    fig.suptitle('Entrenamiento de la red hasta la época guardada (configuración elegida, 3 semillas)')
+    fig.suptitle('Ajuste final de la red con todo el entrenamiento (configuración elegida, 3 semillas)')
     fig.tight_layout(); fig.savefig(archivo, dpi=150); plt.close(fig)
     return archivo
 
-# Ejecución: entrenamiento de las tres cabezas y selección con validación
+# Ejecución: búsqueda de q y lambda por validación cruzada de 5 grupos de estaciones y ajuste final
+# En cada grupo, el normalizador, la FPCA y la calibración de la KAN se ajustan solo con los otros cuatro
+# El grupo que queda fuera sirve para la parada temprana y para medir la pérdida
+# Las curvas de prueba no se usan
 def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, componentes=COMPONENTES_RED,
-                       lambdas=LAMBDAS_RUGOSIDAD, semillas=SEMILLAS, epocas=EPOCAS_MAXIMAS, prefijo='08_red'):
+                       lambdas=LAMBDAS_RUGOSIDAD, semillas=SEMILLAS, epocas=EPOCAS_MAXIMAS, n_folds=GRUPOS_VC,
+                       prefijo='08_red'):
     if escala not in TRANSFORMACIONES: raise ValueError(f'Escalas permitidas: {tuple(TRANSFORMACIONES)}')
     datos = cargar_datos_red(carpeta, escala)
     gram_s, rugosidad_s = matrices_integracion(datos['t'], datos['phi_sat'])
     gram_e, _ = matrices_integracion(datos['t'], datos['phi_est'])
-    normalizador = NormalizadorCovariables().ajustar(datos['cov'], datos['particion'])
-    cov_norm = normalizador.transformar(datos['cov'])
+    entrenamiento = datos['particion'] == 'entrenamiento'
+    grupos = datos['grupo_vc']
+    if set(grupos[entrenamiento]) != set(range(1, n_folds + 1)):
+        raise ValueError(f'Los grupos de validación cruzada deben ir de 1 a {n_folds}.')
     cabezas = ('lineal', 'MLP', 'KAN')
     Path('Tablas').mkdir(exist_ok=True)
 
@@ -687,35 +710,51 @@ def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, compo
     assert tabla_parametros['diferencia_pct'].le(10).all(), 'KAN y MLP difieren en más de 10 % de parámetros.'
     tabla_parametros.to_csv(f'Tablas/{prefijo}_parametros_cabezas.csv', index=False)
 
-    # Varianza explicada acumulada de la FPCA para M = 1, ..., K (justificación de M)
+    # Varianza explicada acumulada de la FPCA para M = 1, ..., K con todo el entrenamiento (justificación de M)
     k_est = datos['phi_est'].shape[1]
     explicada = preparar_fpca(datos, k_est)[0]['explicada']
     pd.DataFrame({'M': range(1, k_est + 1), 'varianza_explicada_acumulada': np.cumsum(explicada[:k_est])}) \
         .to_csv(f'Tablas/{prefijo}_fpca_varianza.csv', index=False)
     Path('Figuras').mkdir(exist_ok=True)
     grafica_sedimentacion(explicada[:k_est], max(componentes), f'Figuras/{prefijo}_fpca_sedimentacion.png')
-    fpcas = {m: preparar_fpca(datos, m) for m in componentes}
 
-    # Búsqueda de hiperparámetros: las mismas q, M, lambda y semillas para las tres cabezas
-    busqueda, modelos = [], {}
-    for cabeza in cabezas:
-        for q in neuronas:
-            for m in componentes:
-                fpca, mu_c, psi_c, _ = fpcas[m]
-                for lam in lambdas:
-                    for semilla in semillas:
-                        modelo, perdida, resumen, _ = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s,
-                                                                   gram_e, fpca, mu_c, psi_c, cov_norm, epocas)
-                        modelos[(cabeza, q, m, lam, semilla)] = (modelo, perdida)
-                        busqueda.append({'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam, 'semilla': semilla, **resumen})
-                        print(f'{cabeza} q={q} M={m} lambda={lam} semilla={semilla:04d}: '
-                              f'validación={resumen["perdida_validacion"]:.4f} (época {resumen["mejor_epoca"]})', flush=True)
+    # Búsqueda de hiperparámetros: las mismas q, M, lambda, semillas y grupos para las tres cabezas
+    # Se guarda la predicción de cada grupo cuando queda fuera (coeficientes en la escala del modelo)
+    busqueda, fuera_de_grupo = [], {}
+    for grupo in range(1, n_folds + 1):
+        tr = entrenamiento & (grupos != grupo)
+        va = entrenamiento & (grupos == grupo)
+        cov_norm = NormalizadorCovariables().ajustar(datos['cov'], tr).transformar(datos['cov'])
+        fpcas = {m: preparar_fpca(datos, m, tr) for m in componentes}
+        for cabeza in cabezas:
+            for q in neuronas:
+                for m in componentes:
+                    fpca, mu_c, psi_c, _ = fpcas[m]
+                    for lam in lambdas:
+                        for semilla in semillas:
+                            modelo, perdida, resumen, _ = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s,
+                                                                       rugosidad_s, gram_e, fpca, mu_c, psi_c,
+                                                                       cov_norm, tr, va, epocas)
+                            clave = (cabeza, q, m, lam, semilla)
+                            if clave not in fuera_de_grupo:
+                                fuera_de_grupo[clave] = np.full(datos['c_est'].shape, np.nan)
+                            with torch.no_grad():
+                                fuera_de_grupo[clave][va] = perdida.coeficientes(
+                                    modelo(torch.as_tensor(datos['c_sat'][va]), torch.as_tensor(cov_norm[va]))).numpy()
+                            busqueda.append({'fold': grupo, 'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam,
+                                             'semilla': semilla, 'curvas_ajuste': int(tr.sum()),
+                                             'curvas_validacion': int(va.sum()), **resumen})
+                            print(f'fold {grupo} {cabeza} q={q} M={m} lambda={lam} semilla={semilla:04d}: '
+                                  f'validación={resumen["perdida_validacion"]:.4f} (época {resumen["mejor_epoca"]})',
+                                  flush=True)
     tabla_busqueda = pd.DataFrame(busqueda)
     tabla_busqueda.to_csv(f'Tablas/{prefijo}_busqueda_hiperparametros.csv', index=False)
-    resumen = (tabla_busqueda.groupby(['cabeza', 'q', 'M', 'lambda'])['perdida_validacion']
-               .agg(['mean', 'std']).reset_index())
+    resumen = (tabla_busqueda.groupby(['cabeza', 'q', 'M', 'lambda'])
+               .agg(mean=('perdida_validacion', 'mean'), std=('perdida_validacion', 'std'),
+                    epocas_finales=('mejor_epoca', 'median')).reset_index())
+    resumen['epocas_finales'] = resumen['epocas_finales'].round().astype(int)
     # q y M comunes a las tres cabezas (mismo codificador y mismo decodificador): para cada (q, M) se toma
-    # el mejor lambda de cada cabeza y se promedia la pérdida de validación de las tres cabezas
+    # el mejor lambda de cada cabeza y se promedia la pérdida de validación cruzada de las tres cabezas
     # lambda se elige por cabeza porque es parte de la pérdida, no de la arquitectura
     mejor_lambda = resumen.loc[resumen.groupby(['cabeza', 'q', 'M'])['mean'].idxmin()]
     q_comun, m_comun = mejor_lambda.groupby(['q', 'M'])['mean'].mean().idxmin()
@@ -723,14 +762,39 @@ def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, compo
     elegidas.to_csv(f'Tablas/{prefijo}_configuracion_elegida.csv')
     print(elegidas.to_string())
 
+    # Predicciones de validación cruzada de la configuración elegida (cada curva de entrenamiento predicha
+    # por el modelo que no la vio); las usan la ablación de cabezas y la elección de la semilla en la evaluación
+    carpeta_modelos = Path('Resultados_Modelos1'); carpeta_modelos.mkdir(exist_ok=True)
+    predicciones_vc = {}
+    for cabeza in cabezas:
+        q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), float(elegidas.loc[cabeza, 'lambda'])
+        for semilla in semillas:
+            predicciones_vc[f'{cabeza}_semilla{semilla:04d}'] = fuera_de_grupo[(cabeza, q, m, lam, semilla)]
+    np.savez(carpeta_modelos / 'predicciones_vc.npz', curva=datos['meta'].curva.to_numpy(), escala=escala,
+             **predicciones_vc)
+
+    # Ajuste final de cada cabeza con todo el entrenamiento: la mediana de las mejores épocas de los grupos
+    normalizador = NormalizadorCovariables().ajustar(datos['cov'], entrenamiento)
+    cov_norm = normalizador.transformar(datos['cov'])
+    fpcas = {m: preparar_fpca(datos, m) for m in componentes}
+    modelos = {}
+    for cabeza in cabezas:
+        q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), float(elegidas.loc[cabeza, 'lambda'])
+        fpca, mu_c, psi_c, _ = fpcas[m]
+        for semilla in semillas:
+            modelos[(cabeza, semilla)] = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s, gram_e,
+                                                      fpca, mu_c, psi_c, cov_norm, entrenamiento, None,
+                                                      int(elegidas.loc[cabeza, 'epocas_finales']))[:2]
+
     # Equivalencia de la cabeza lineal elegida con la regresión función a función (cada semilla)
-    q, m, lam = int(elegidas.loc['lineal', 'q']), int(elegidas.loc['lineal', 'M']), elegidas.loc['lineal', 'lambda']
-    idx_va = np.flatnonzero(datos['particion'] == 'validacion')
+    # Se comprueba en 100 curvas de entrenamiento
+    m = int(elegidas.loc['lineal', 'M'])
+    idx_eq = np.flatnonzero(entrenamiento)[:100]
     equivalencia = []
     for semilla in semillas:
-        modelo = modelos[('lineal', q, m, lam, semilla)][0]
-        error_integral, _ = verificar_regresion_funcional(modelo, datos, fpcas[m][0], cov_norm, idx_va)
-        error_coeficientes = verificar_equivalencia_lineal(modelo, datos['c_sat'][idx_va], cov_norm[idx_va],
+        modelo = modelos[('lineal', semilla)][0]
+        error_integral, _ = verificar_regresion_funcional(modelo, datos, fpcas[m][0], cov_norm, idx_eq)
+        error_coeficientes = verificar_equivalencia_lineal(modelo, datos['c_sat'][idx_eq], cov_norm[idx_eq],
                                                            fpcas[m][0]['media'], fpcas[m][0]['base'].T)
         equivalencia.append({'semilla': semilla, 'diferencia_max_integral': error_integral,
                              'diferencia_max_coeficientes': error_coeficientes})
@@ -739,28 +803,27 @@ def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, compo
     tabla_equivalencia.to_csv(f'Tablas/{prefijo}_equivalencia_lineal.csv', index=False)
     print(tabla_equivalencia.to_string(index=False))
 
-    # Valores recortados en 0 al volver a mm (validación, configuración elegida de cada cabeza)
-    va = datos['particion'] == 'validacion'
+    # Valores recortados en 0 al volver a mm (entrenamiento, ajuste final de cada cabeza)
     recortes = []
     for cabeza in cabezas:
-        q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), elegidas.loc[cabeza, 'lambda']
         for semilla in semillas:
-            modelo, perdida = modelos[(cabeza, q, m, lam, semilla)]
+            modelo, perdida = modelos[(cabeza, semilla)]
             with torch.no_grad():
-                c_hat = perdida.coeficientes(modelo(torch.as_tensor(datos['c_sat'][va]), torch.as_tensor(cov_norm[va]))).numpy()
+                c_hat = perdida.coeficientes(modelo(torch.as_tensor(datos['c_sat'][entrenamiento]),
+                                                    torch.as_tensor(cov_norm[entrenamiento]))).numpy()
             _, recortados = reconstruir_mm(c_hat, datos['phi_est'], escala)
             recortes.append({'cabeza': cabeza, 'semilla': semilla, 'valores_recortados_pct': recortados})
     pd.DataFrame(recortes).to_csv(f'Tablas/{prefijo}_valores_recortados.csv', index=False)
 
-    # Pesos de los modelos elegidos (3 cabezas x semillas) con la FPCA y el normalizador de covariables
-    carpeta_modelos = Path('Resultados_Modelos1'); carpeta_modelos.mkdir(exist_ok=True)
+    # Pesos de los modelos finales (3 cabezas x semillas) con la FPCA y el normalizador de covariables
     for cabeza in cabezas:
         q, m, lam = int(elegidas.loc[cabeza, 'q']), int(elegidas.loc[cabeza, 'M']), float(elegidas.loc[cabeza, 'lambda'])
         fpca, mu_c, psi_c, _ = fpcas[m]
         for semilla in semillas:
-            modelo = modelos[(cabeza, q, m, lam, semilla)][0]
+            modelo = modelos[(cabeza, semilla)][0]
             torch.save({'estado': modelo.state_dict(), 'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam,
-                        'semilla': semilla, 'escala': escala, 'media_fpca': fpca['media'], 'base_fpca': fpca['base'],
+                        'semilla': semilla, 'escala': escala, 'epocas': int(elegidas.loc[cabeza, 'epocas_finales']),
+                        'media_fpca': fpca['media'], 'base_fpca': fpca['base'],
                         'media_coeficientes': mu_c, 'base_coeficientes': psi_c,
                         'media_covariables': normalizador.media, 'desviacion_covariables': normalizador.desviacion},
                        carpeta_modelos / f'red_{cabeza}_semilla{semilla:04d}.pt')

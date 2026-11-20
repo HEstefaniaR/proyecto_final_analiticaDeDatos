@@ -7,8 +7,9 @@ import matplotlib.pyplot as plt
 import Entrenamiento_red as Mo
 import Ablacion_arquitectura as Aa
 
-# Ablación de las cabezas lineal, MLP y KAN con los modelos entrenados en Entrenamiento_red.py (objetivo directo)
+# Ablación de las cabezas lineal, MLP y KAN con la validación cruzada de Entrenamiento_red.py (objetivo directo)
 # Mismo codificador, mismo decodificador FPCA, parámetros de KAN y MLP igualados y 3 semillas por cabeza
+# Cada curva de entrenamiento se evalúa con la predicción del modelo que no la vio; la prueba no se usa
 CABEZAS = ('lineal', 'MLP', 'KAN')
 SATELITE = 'Satélite sin corregir'
 SEMILLAS = Mo.SEMILLAS
@@ -20,21 +21,17 @@ METRICAS = {'L2_relativo': True, 'KGE': False, 'sesgo_abs_%': True, 'pico1_penta
 COLORES = {'lineal': 'tab:red', 'MLP': 'tab:blue', 'KAN': 'tab:green', SATELITE: 'darkorange'}
 
 
-# Curvas predichas en mm (malla fina) de cada cabeza y semilla para las curvas de validación
-def predicciones_validacion(D):
+# Curvas predichas en mm (malla fina) de cada cabeza y semilla con la validación cruzada del notebook 01
+def predicciones_vc(D):
     datos, va = D['datos'], D['va']
-    W_s, R_s = Mo.matrices_integracion(datos['t'], datos['phi_sat'])
-    c_sat = torch.as_tensor(datos['c_sat'][va])
+    g = np.load(CARPETA_MODELOS / 'predicciones_vc.npz', allow_pickle=True)
+    assert (g['curva'] == D['meta'].curva.to_numpy()).all(), 'Las curvas no coinciden con la exportación de R.'
     pred = {}
     for cabeza in CABEZAS:
         for s in SEMILLAS:
-            g = torch.load(CARPETA_MODELOS / f'red_{cabeza}_semilla{s:04d}.pt', weights_only=False)
-            modelo = Mo.crear_modelo(cabeza, W_s, R_s, g['q'], g['M'])
-            modelo.load_state_dict(g['estado']); modelo.eval()
-            cov = torch.as_tensor((datos['cov'][va] - g['media_covariables']) / g['desviacion_covariables'])
-            with torch.no_grad(): puntajes = modelo(c_sat, cov).numpy()
-            c_hat = g['media_coeficientes'] + puntajes @ g['base_coeficientes']
-            pred[(cabeza, s)] = Mo.reconstruir_mm(c_hat, datos['phi_est'], g['escala'])[0]
+            c_hat = g[f'{cabeza}_semilla{s:04d}'][va]
+            assert np.isfinite(c_hat).all(), 'Faltan predicciones de validación cruzada.'
+            pred[(cabeza, s)] = Mo.reconstruir_mm(c_hat, datos['phi_est'], str(g['escala']))[0]
     pred[(SATELITE, 1)] = D['satelite_mm']
     return pred
 
@@ -70,7 +67,7 @@ def tablas_por_curva(D, pred):
     return {clave: metricas_por_curva(D, curva) for clave, curva in pred.items()}
 
 
-# Métricas de cada modelo en validación: media y desviación estándar de las semillas
+# Métricas de cada modelo en validación cruzada: media y desviación estándar de las semillas
 def tabla_metricas(por_curva):
     filas = []
     for modelo in (*CABEZAS, SATELITE):
@@ -138,7 +135,7 @@ def grafica_intervalos(comparacion):
     return fig
 
 
-# Curvas de validación en las 72 péntadas: promedio de las 3 semillas de cada cabeza, satélite y climatología
+# Curvas de entrenamiento (validación cruzada) en las 72 péntadas: promedio de las 3 semillas de cada cabeza, satélite y climatología
 def curvas_pentadas(D, pred):
     curvas = {m: np.mean([c[:, D['filas']] for (mm, s), c in pred.items() if mm == m], axis=0) for m in (*CABEZAS, SATELITE)}
     curvas['Climatología'] = np.tile(D['climatologia'], (D['va'].sum(), 1))
@@ -171,7 +168,7 @@ def aprendizaje_media(D, pred):
     return pd.DataFrame(filas).set_index('modelo')
 
 
-# Correlación, en cada péntada, entre anomalías predichas y observadas a través de las curvas de validación
+# Correlación, en cada péntada, entre anomalías predichas y observadas a través de las curvas evaluadas
 def grafica_anomalias(D, pred):
     ref, clim = D['referencia'], D['climatologia']
     curvas = curvas_pentadas(D, pred)
@@ -188,7 +185,7 @@ def grafica_anomalias(D, pred):
     axes[1].plot(o, curvas[SATELITE].sum(1), '.', c=COLORES[SATELITE], ms=4, alpha=.4, label=SATELITE)
     axes[1].axhline(curvas['Climatología'][0].sum(), c='k', ls='--', lw=1, label='Climatología')
     lim = [min(o.min(), p.min()), max(o.max(), p.max())]; axes[1].plot(lim, lim, 'k:', lw=.8)
-    axes[1].set(title='Acumulado anual en validación', xlabel='Estación (mm)', ylabel='Predicho (mm)'); axes[1].legend(frameon=False)
+    axes[1].set(title='Acumulado anual en validación cruzada', xlabel='Estación (mm)', ylabel='Predicho (mm)'); axes[1].legend(frameon=False)
     fig.tight_layout()
     return fig
 
@@ -242,6 +239,6 @@ def grafica_media(D, pred):
         media = np.mean(curvas, axis=0).mean(0)
         axes[0].plot(t, media, c=COLORES[modelo], label=modelo)
         axes[1].plot(t, 100 * (media / m_obs - 1), c=COLORES[modelo], label=modelo)
-    axes[0].set(xlabel='Péntada', ylabel='mm', title='Media en validación'); axes[0].legend(frameon=False)
+    axes[0].set(xlabel='Péntada', ylabel='mm', title='Media en validación cruzada'); axes[0].legend(frameon=False)
     axes[1].axhline(0, c='k', lw=.5); axes[1].set(xlabel='Péntada', ylabel='%', title='Sesgo por péntada'); axes[1].legend(frameon=False)
     return fig

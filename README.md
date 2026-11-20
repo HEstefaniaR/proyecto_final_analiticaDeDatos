@@ -54,8 +54,8 @@ uv sync
 2. Abrir `Evaluacion_interpretacion.ipynb` 
 
 El notebook hace lo siguiente:
-- elige la semilla de cada cabeza con validación;
-- calcula en prueba las cuatro métricas con IC bootstrap y la prueba de Wilcoxon;
+- elige la semilla de cada cabeza con la validación cruzada del notebook 01 (`Resultados_Modelos1/predicciones_vc.npz`);
+- calcula en prueba las cuatro métricas con IC bootstrap por estaciones;
 - separa los resultados por fase ENSO;
 - interpreta la KAN;
 - escribe `predicciones_estaciones_reservadas.csv`.
@@ -70,7 +70,7 @@ proyecto_final_analiticaDeDatos/
 │   ├── Entrenamiento_red.py            
 │   ├── Ablacion_arquitectura.py        
 │   └── Ablacion_cabezas.py             
-├── 01_Entrenamiento_red.ipynb          # Entrenamiento y selección con validación
+├── 01_Entrenamiento_red.ipynb          # Entrenamiento y selección con validación cruzada
 ├── 02_Ablacion_arquitectura.ipynb      
 ├── 03_Ablacion_cabezas.ipynb           
 ├── 04_Evaluacion_interpretacion.ipynb   
@@ -132,32 +132,37 @@ Todo está en `data/`:
 ## Parte 3 - Script de R
 1. **Carga de datos** y días faltantes por año y estación.
 2. **Partición por estaciones.**
-   - **Sorteo:** dentro de cada tercil de altitud, 70 % de las estaciones a entrenamiento, 15 % a validación y 15 % a prueba.
-   - **Años de cada grupo:** entrenamiento 1981–1995, validación 1996–2000 y prueba 2001–2003.
+   - **Sorteo:** dentro de cada tercil de altitud, 15 % de las estaciones a prueba, elegidas entre las que tienen datos desde 1998; el resto queda en entrenamiento.
+   - **Años de cada grupo:** entrenamiento 1981–1997 y prueba 1998–2003, que incluye La Niña de 1998–2001 y El Niño de 2002–2003.
+   - **Validación cruzada:** las estaciones de entrenamiento con datos hasta 1997 se reparten en 5 grupos dentro de cada tercil de altitud; cada estación queda en un solo grupo (`01_particion_estaciones.csv`, columna `grupo_vc`). La regresión funcional y la red usan los mismos grupos.
    - **Quedan fuera del modelo:** las estaciones sin coordenadas o sin altitud. Sí se usan en el EDA y en las comparaciones.
 3. **Preprocesamiento:**
    - errores aislados de más de 400 mm;
    - totales mensuales registrados en un solo día;
-   - imputación de días faltantes por IDW con las 5 estaciones de entrenamiento más cercanas que tienen dato ese día, solo en estación-año con menos del 20 % de días faltantes usando la distancia euclidiana en km con coordenadas y altitud (`01_preprocesamiento_imputacion_IDW.csv`);
+   - imputación de días faltantes por IDW con las K estaciones de entrenamiento más cercanas (K elegido en cada zona por validación cruzada dejando una estación fuera, `01_preprocesamiento_imputacion_seleccion_K.csv`) que tienen dato ese día (peso 1/distancia, distancia euclidiana con las coordenadas), solo en estación-año con menos del 20 % de días faltantes; las vecinas son de la misma zona, valle (hasta 1239 m) o montaña, como en Russi y Larrahondo (2017) (`01_preprocesamiento_imputacion.csv`);
    - cobertura mínima por estación y año (95 % de los días, huecos y bordes de máximo 7 días), después de imputar.
 
    Las reglas se revisan solo con estaciones de entrenamiento y se aplican a todos los datos. La trazabilidad queda en `01_preprocesamiento_trazabilidad.csv`.
 4. **ONI y fases ENSO** (criterio NOAA).
 5. **Emparejamiento estación-píxel** con las imágenes CHIRPS.
-6. **Construcción de datos funcionales.**
+6. **Descriptivo de los datos emparejados**, antes de construir las curvas, con todos los pares limpios e imputados de 1981 a 2003.
+   - Estadísticas por péntada de estación y satélite, para todos los años y por año: media, DE, coeficiente de variación, cuartiles, mínimo, máximo y porcentaje de péntadas y de días faltantes (`03_descriptivo_estadisticas.csv`, `03_descriptivo_CV_por_anio.png`).
+   - Dispersión estación frente a satélite por año (`03_descriptivo_dispersion_por_anio.png`).
+   - Correlación estación-satélite por péntada y de la lluvia media de cada curva con la altitud (`03_descriptivo_correlacion.csv`, `03_descriptivo_altitud.png`).
+7. **Construcción de datos funcionales.**
    - Matriz Φ y mínimos cuadrados programados paso a paso.
    - Comparación de bases B-spline, Fourier y monomial, con MCO, MCP y penalización, usando ECM, VC y VCG.
    - B-spline cúbica con MCP y K elegido por VCG (K = 6 en estaciones y K = 11 en satélite).
    - Verificación de S, covarianza residual y bandas de confianza punto a punto.
-7. **Análisis exploratorio funcional.**
+8. **Análisis exploratorio funcional.**
    - Media verificada contra `fda`, varianza, covarianza, correlación y derivadas.
    - Profundidades de Fraiman–Muniz y MBD, y boxplot funcional con las curvas atípicas.
-8. **Comparación funcional por fuente.**
+9. **Comparación funcional por fuente.**
    - Diferencia d(t) con su banda ± 2 EE y los tramos donde la banda no contiene el cero.
    - Correlación cruzada y prueba t.
    - ANOVA funcional por fase ENSO.
-9. **Regresión funcional.** Modelos función a función (`linmod`) y concurrente con altitud y ONI (`fRegress`); λ se elige con validación. La red se compara solo con el función a función.
-10. **Curvas para Python.** Exporta `Curvas/` en la escala √P, solo con las curvas de entrenamiento, validación y prueba.
+10. **Regresión funcional.** Modelos función a función (`linmod`) y concurrente con altitud y ONI (`fRegress`); λ se elige con validación cruzada de 5 grupos de estaciones y el modelo final se ajusta con todo el entrenamiento. La red se compara solo con el función a función.
+11. **Curvas para Python.** Exporta `Curvas/` en la escala √P, solo con las curvas de entrenamiento y prueba, y el grupo de validación cruzada de cada curva de entrenamiento.
 
 ## Parte 4 - La red funcional
 - **Codificador:** z_k = a_kᵀ W c, con W, la matriz de Gram de la base del satélite, calculada por cuadratura.
@@ -171,21 +176,24 @@ Todo está en `data/`:
 - **Decodificador:**
   - **FPCA con M = 5** (96,5 % de la varianza): media y funciones propias de las curvas de estaciones de entrenamiento, congeladas.
 - **Pérdida:** norma L² funcional (ĉ − c)ᵀ W (ĉ − c) más la penalización de rugosidad, en la escala √P. La predicción se recorta en 0 antes de volver a mm.
-- **Entrenamiento:** lote completo, AdamW con tasa 0,01, hasta 3000 épocas y parada temprana con paciencia de 200 épocas sobre la pérdida de validación.
+- **Entrenamiento:** lote completo y AdamW con tasa 0,01.
+  - **Validación cruzada de 5 grupos de estaciones:** en cada grupo, el modelo se ajusta con los otros cuatro, hasta 3000 épocas, con parada temprana (paciencia de 200 épocas) sobre la pérdida del grupo que queda fuera. El normalizador de covariables, la FPCA y la calibración de la KAN se calculan solo con las curvas de ajuste.
+  - **Selección:** q y λ con la pérdida L² media de los 5 grupos y las 3 semillas.
+  - **Ajuste final:** cada cabeza se reajusta con todo el entrenamiento durante la mediana de las mejores épocas de los grupos. La prueba no se usa.
 
 ## Parte 5 - Notebooks
 
 | Notebook | Qué hace |
 | --- | --- |
-| `01_Entrenamiento_red.ipynb` | Comprobaciones del codificador y de la MLP; KAN verificada con una función sintética (RMSE ≤ 0,01), activaciones y ajuste simbólico; búsqueda de q y λ con 3 semillas; equivalencia numérica de la cabeza lineal con la regresión función a función; pérdida y métricas por época. Guarda los pesos en `Resultados_Modelos1/`. |
-| `02_Ablacion_arquitectura.ipynb` | Ablación: q y M, capas e intervalos de la KAN y forma del ONI; diagnóstico del mejor modelo en validación. |
-| `03_Ablacion_cabezas.ipynb` | Lineal, MLP y KAN en validación: métricas, climatología, desfase de los picos y bootstrap por estaciones (2000 remuestreos).  |
-| `Evaluacion_interpretacion.ipynb` | Evaluación final en prueba contra la curva suavizada de la estación: L² relativo, KGE, sesgo anual y error de la fecha de los dos picos, con IC bootstrap y Wilcoxon por estación; resultados por fase ENSO; w_k(t), activaciones de la KAN, contraste con la cabeza lineal, ajuste simbólico y peores casos; CSV de las estaciones de prueba. |
+| `01_Entrenamiento_red.ipynb` | Comprobaciones del codificador y de la MLP; KAN verificada con una función sintética (RMSE ≤ 0,01), activaciones y ajuste simbólico; búsqueda de q y λ por validación cruzada de 5 grupos de estaciones con 3 semillas y ajuste final con todo el entrenamiento; equivalencia numérica de la cabeza lineal con la regresión función a función; pérdida y métricas por época. Guarda los pesos de los modelos finales y las predicciones de validación cruzada de la configuración elegida en `Resultados_Modelos1/`. |
+| `02_Ablacion_arquitectura.ipynb` | Ablación con validación cruzada de 5 grupos de estaciones de entrenamiento: q y M, capas e intervalos de la KAN y forma del ONI; diagnóstico del mejor modelo. No usa la prueba. |
+| `03_Ablacion_cabezas.ipynb` | Lineal, MLP y KAN con las predicciones de validación cruzada del notebook 01: métricas, climatología, desfase de los picos y bootstrap por estaciones (2000 remuestreos).  |
+| `Evaluacion_interpretacion.ipynb` | Evaluación final en prueba contra la curva suavizada de la estación: L² relativo, KGE, sesgo anual y error de la fecha de los dos picos, con IC bootstrap por estaciones; resultados por fase ENSO; w_k(t), activaciones de la KAN, contraste con la cabeza lineal, ajuste simbólico y peores casos; CSV de las estaciones de prueba. |
 
 
 ## Parte 6 - Predicciones de las estaciones de prueba
 
-`predicciones_estaciones_reservadas.csv` tiene las predicciones de la KAN seleccionada para las 24 estaciones de prueba (60 curvas estación-año de 2001–2003).
+`predicciones_estaciones_reservadas.csv` tiene las predicciones de la KAN seleccionada para las estaciones de prueba (curvas estación-año de 1998–2003).
 
 | Columna | Contenido |
 | --- | --- |
