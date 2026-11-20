@@ -134,51 +134,54 @@ departamentos_col <- gadm(country = "COL", level = 1, path = tempdir())
 valle <- departamentos_col[departamentos_col$NAME_1 == "Valle del Cauca", ]
 
 
-#################### Particion por estaciones ####################
-# 70 % entrenamiento, 15 % validacion y 15 % prueba
-# EDA y las comparaciones usan todos los datos
-estaciones_particion <- info_estaciones[info_estaciones$STATION_ID %in% p_tierra$STATION_ID &
-                                          !is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
-                                          !is.na(info_estaciones$altitud_completa),
-                                        c("STATION_ID", "altitud_completa")]
-estaciones_particion$tercil_altitud <- cut(estaciones_particion$altitud_completa,
-                                           quantile(estaciones_particion$altitud_completa, c(0, 1/3, 2/3, 1)),
-                                           labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
-con_prueba <- estaciones_particion$STATION_ID %in% p_tierra$STATION_ID[p_tierra$YEAR >= 2001]
-con_validacion <- estaciones_particion$STATION_ID %in% p_tierra$STATION_ID[p_tierra$YEAR >= 1996 & p_tierra$YEAR <= 2000]
 
+#################### Particion por estaciones ####################
+# Entrenamiento 1981-1997 y prueba 1998-2003
+# Se reserva el 15 % de estaciones para prueba
+estaciones_particion <- info_estaciones[info_estaciones$STATION_ID %in% p_tierra$STATION_ID &
+  !is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
+  !is.na(info_estaciones$altitud_completa), c("STATION_ID", "altitud_completa")]
+estaciones_particion$STATION_ID <- as.character(estaciones_particion$STATION_ID)
+estaciones_particion$tercil_altitud <- cut(estaciones_particion$altitud_completa,
+  quantile(estaciones_particion$altitud_completa, c(0, 1/3, 2/3, 1)),
+  labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
+con_train <- estaciones_particion$STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR <= 1997])
+con_prueba <- estaciones_particion$STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR >= 1998])
+estaciones_particion <- estaciones_particion[con_train, ]
+con_prueba <- con_prueba[con_train]
 set.seed(2026)
 estaciones_particion$particion <- "entrenamiento"
 for (tercil in levels(estaciones_particion$tercil_altitud)) {
-  en_tercil <- estaciones_particion$tercil_altitud == tercil
-  n_reservadas <- round(0.15 * sum(en_tercil))
+  en_tercil <- !is.na(estaciones_particion$tercil_altitud) &
+    estaciones_particion$tercil_altitud == tercil
   candidatas <- which(en_tercil & con_prueba)
-  estaciones_particion$particion[candidatas[sample.int(length(candidatas), n_reservadas)]] <- "prueba"
-  candidatas <- which(en_tercil & con_validacion & estaciones_particion$particion == "entrenamiento")
-  estaciones_particion$particion[candidatas[sample.int(length(candidatas), n_reservadas)]] <- "validacion"
+  n_reservadas <- min(length(candidatas), round(0.15 * sum(en_tercil)))
+  if (n_reservadas > 0) {
+    elegidas <- sample(candidatas, n_reservadas)
+    estaciones_particion$particion[elegidas] <- "prueba"
+  }
 }
 table(estaciones_particion$tercil_altitud, estaciones_particion$particion)
 guardar_tabla(estaciones_particion[order(estaciones_particion$particion, estaciones_particion$STATION_ID), ],
-              "01_particion_estaciones.csv")
-
-
+  "01_particion_estaciones.csv")
 particion_curva <- function(estacion, anio) {
   grupo <- estaciones_particion$particion[match(as.character(estacion), estaciones_particion$STATION_ID)]
   grupo[is.na(grupo)] <- "sin_uso"
-  ifelse(grupo == "entrenamiento" & anio <= 1995, "entrenamiento",
-         ifelse(grupo == "validacion" & anio >= 1996 & anio <= 2000, "validacion",
-                ifelse(grupo == "prueba" & anio >= 2001, "prueba", "sin_uso")))
+  ifelse(grupo == "entrenamiento" & anio >= 1981 & anio <= 1997, "entrenamiento",
+    ifelse(grupo == "prueba" & anio >= 1998 & anio <= 2003, "prueba", "sin_uso"))
 }
-# Estaciones de entrenamiento, referencia del preprocesamiento
+estaciones_train <- estaciones_particion$STATION_ID[estaciones_particion$particion == "entrenamiento"]
+estaciones_test <- estaciones_particion$STATION_ID[estaciones_particion$particion == "prueba"]
+stopifnot(length(intersect(estaciones_train, estaciones_test)) == 0)
+stopifnot(length(estaciones_train) >= 5, length(estaciones_test) > 0)
 es_entrenamiento <- function(estacion) {
   grupo <- estaciones_particion$particion[match(as.character(estacion), estaciones_particion$STATION_ID)]
   !is.na(grupo) & grupo == "entrenamiento"
 }
 
-
 #################### Preprocesamiento de las estaciones ####################
 # Las reglas se revisan con las estaciones de entrenamiento (1981-1995) y se aplican a todos los datos
-p_revision <- p_tierra[es_entrenamiento(p_tierra$STATION_ID) & p_tierra$YEAR <= 1995, ]
+p_revision <- p_tierra[es_entrenamiento(p_tierra$STATION_ID) & p_tierra$YEAR <= 1997, ]
 
 # Valores negativos 
 sum(p_tierra$VALUE < 0, na.rm = TRUE)
@@ -406,7 +409,7 @@ cobertura$cobertura <- cobertura$dias_validos / cobertura$dias
 summary(cobertura)
 
 # Umbrales de cobertura (entrenamiento)
-train <- cobertura[cobertura$YEAR <= 1995 & es_entrenamiento(cobertura$STATION_ID), ]
+train <- cobertura[cobertura$YEAR <= 1997 & es_entrenamiento(cobertura$STATION_ID), ]
 umbrales_cobertura <- data.frame()
 for (u in c(0.85, 0.90, 0.95)) {
   umbrales_cobertura <- rbind(umbrales_cobertura,
@@ -600,25 +603,37 @@ X_matriz <- t(X_sat)
 colnames(Y_matriz) <- paste0("P", sprintf("%02d", tiempos))
 colnames(X_matriz) <- paste0("P", sprintf("%02d", tiempos))
 
-# Entrenamiento, validacion y prueba
+# Entrenamiento 1981-1997 y prueba 1998-2003
 particion_metadatos <- particion_curva(metadatos$STATION_ID, metadatos$YEAR)
 table(particion_metadatos)
-Y_train <- Y_matriz[particion_metadatos == "entrenamiento", ]
-X_train <- X_matriz[particion_metadatos == "entrenamiento", ]
-Y_val <- Y_matriz[particion_metadatos == "validacion", ]
-X_val <- X_matriz[particion_metadatos == "validacion", ]
-Y_test <- Y_matriz[particion_metadatos == "prueba", ]
-X_test <- X_matriz[particion_metadatos == "prueba", ]
 
-nrow(Y_matriz)
-nrow(Y_train)
-nrow(Y_val)
-nrow(Y_test)
+Y_train <- Y_matriz[particion_metadatos == "entrenamiento", , drop = FALSE]
+X_train <- X_matriz[particion_metadatos == "entrenamiento", , drop = FALSE]
+Y_test <- Y_matriz[particion_metadatos == "prueba", , drop = FALSE]
+X_test <- X_matriz[particion_metadatos == "prueba", , drop = FALSE]
+
+# Verificar periodos
+stopifnot(all(metadatos$YEAR[particion_metadatos == "entrenamiento"] >= 1981 &
+              metadatos$YEAR[particion_metadatos == "entrenamiento"] <= 1997))
+stopifnot(all(metadatos$YEAR[particion_metadatos == "prueba"] >= 1998 &
+              metadatos$YEAR[particion_metadatos == "prueba"] <= 2003))
+
+# Verificar que no se repitan estaciones
+estaciones_train <- unique(as.character(metadatos$STATION_ID[particion_metadatos == "entrenamiento"]))
+estaciones_test <- unique(as.character(metadatos$STATION_ID[particion_metadatos == "prueba"]))
+stopifnot(length(intersect(estaciones_train, estaciones_test)) == 0)
+
+# Resumen
+cat("Curvas totales:", nrow(Y_matriz), "\n")
+cat("Curvas entrenamiento:", nrow(Y_train), "\n")
+cat("Curvas prueba:", nrow(Y_test), "\n")
+cat("Estaciones entrenamiento:", length(estaciones_train), "\n")
+cat("Estaciones prueba:", length(estaciones_test), "\n")
+cat("Estaciones compartidas:", length(intersect(estaciones_train, estaciones_test)), "\n")
 
 # Guardar las matrices
 saveRDS(list(Y_matriz = Y_matriz, X_matriz = X_matriz, metadatos = metadatos,
-             Y_train = Y_train, X_train = X_train, Y_val = Y_val, X_val = X_val,
-             Y_test = Y_test, X_test = X_test),
+             Y_train = Y_train, X_train = X_train, Y_test = Y_test, X_test = X_test),
         "Curvas/matrices_funcionales.rds")
 
 # Pentadas faltantes por curva
