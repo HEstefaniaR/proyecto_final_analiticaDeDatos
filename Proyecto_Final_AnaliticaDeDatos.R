@@ -336,6 +336,63 @@ calendario <- merge(calendario, p_m_depurado[, c("STATION_ID", "fecha", "VALUE")
                     by = c("STATION_ID", "fecha"), all.x = TRUE)
 calendario <- calendario[order(calendario$STATION_ID, calendario$fecha), ]
 
+
+# Imputacion por IDW k=5
+# Estacion-año con 20 % o menos de dias faltantes
+K_VECINOS <- 5
+info_idw <- info_estaciones[!is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
+                              !is.na(info_estaciones$altitud_completa), ]
+lat0 <- mean(info_idw$latitud)
+info_idw$x <- info_idw$longitud * 111.32 * cos(lat0 * pi / 180)
+info_idw$y <- info_idw$latitud * 110.57
+info_idw$z <- info_idw$altitud_completa / 1000
+
+faltante <- calendario %>%
+  group_by(STATION_ID, YEAR) %>%
+  summarize(pct_faltante = 100 * mean(is.na(VALUE)), .groups = "drop")
+imputables <- faltante[faltante$pct_faltante > 0 & faltante$pct_faltante < 20, ]
+
+ancho <- calendario %>%
+  dplyr::select(STATION_ID, fecha, VALUE) %>%
+  pivot_wider(names_from = STATION_ID, values_from = VALUE) %>%
+  arrange(fecha)
+donantes <- intersect(as.character(info_idw$STATION_ID[es_entrenamiento(info_idw$STATION_ID)]), names(ancho))
+
+calendario$imputado <- FALSE
+for (s in intersect(as.character(unique(imputables$STATION_ID)), as.character(info_idw$STATION_ID))) {
+  i_s <- match(s, info_idw$STATION_ID)
+  candidatas <- setdiff(donantes, s)
+  j <- match(candidatas, info_idw$STATION_ID)
+  d <- sqrt((info_idw$x[j] - info_idw$x[i_s])^2 + (info_idw$y[j] - info_idw$y[i_s])^2 + (info_idw$z[j] - info_idw$z[i_s])^2)
+  d <- pmax(d, 0.1)
+  orden <- order(d)
+  candidatas <- candidatas[orden]
+  d <- d[orden]
+  suma <- peso <- n_vecinos <- numeric(nrow(ancho))
+  for (k in seq_along(candidatas)) {
+    v <- ancho[[candidatas[k]]]
+    usar <- !is.na(v) & n_vecinos < K_VECINOS
+    suma[usar] <- suma[usar] + v[usar] / d[k]
+    peso[usar] <- peso[usar] + 1 / d[k]
+    n_vecinos[usar] <- n_vecinos[usar] + 1
+    if (all(n_vecinos >= K_VECINOS)) break
+  }
+  estimado <- ifelse(n_vecinos == K_VECINOS, suma / peso, NA)
+  anios <- imputables$YEAR[as.character(imputables$STATION_ID) == s]
+  filas <- which(as.character(calendario$STATION_ID) == s & is.na(calendario$VALUE) & calendario$YEAR %in% anios)
+  valor <- estimado[match(calendario$fecha[filas], ancho$fecha)]
+  calendario$VALUE[filas] <- valor
+  calendario$imputado[filas] <- !is.na(valor)
+}
+imputacion_idw <- data.frame(estacion_anio_imputables = nrow(imputables),
+                             dias_imputados = sum(calendario$imputado),
+                             dias_sin_vecinas = sum(is.na(calendario$VALUE) &
+                                                      paste(calendario$STATION_ID, calendario$YEAR) %in%
+                                                      paste(imputables$STATION_ID, imputables$YEAR)))
+imputacion_idw
+guardar_tabla(imputacion_idw, "01_preprocesamiento_imputacion_IDW.csv")
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(calendario, "Imputacion IDW"))
+
 # Cobertura, hueco mas largo y faltantes en los bordes
 cobertura <- calendario %>%
   group_by(STATION_ID, YEAR) %>%

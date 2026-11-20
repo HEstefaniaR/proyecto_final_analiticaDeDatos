@@ -12,7 +12,7 @@ SEMILLAS = (1, 2, 3)  # 0001, 0002, 0003
 # Parámetros ajustables: cambiar OCULTAS tras conocer los parámetros de la cabeza KAN
 OCULTAS = 8
 ACTIVACION = nn.Tanh
-OCULTAS_KAN = 2
+OCULTAS_KAN = 4
 INTERVALOS_KAN = 12
 
 # Entrenamiento de la red funcional

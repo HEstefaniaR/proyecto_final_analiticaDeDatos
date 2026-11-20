@@ -138,7 +138,8 @@ Todo está en `data/`:
 3. **Preprocesamiento:**
    - errores aislados de más de 400 mm;
    - totales mensuales registrados en un solo día;
-   - cobertura mínima por estación y año (95 % de los días, huecos y bordes de máximo 7 días).
+   - imputación de días faltantes por IDW con las 5 estaciones de entrenamiento más cercanas que tienen dato ese día, solo en estación-año con menos del 20 % de días faltantes usando la distancia euclidiana en km con coordenadas y altitud (`01_preprocesamiento_imputacion_IDW.csv`);
+   - cobertura mínima por estación y año (95 % de los días, huecos y bordes de máximo 7 días), después de imputar.
 
    Las reglas se revisan solo con estaciones de entrenamiento y se aplican a todos los datos. La trazabilidad queda en `01_preprocesamiento_trazabilidad.csv`.
 4. **ONI y fases ENSO** (criterio NOAA).
@@ -165,8 +166,8 @@ Todo está en `data/`:
   - Las funciones de pesos tienen penalización de rugosidad.
 - **Cabezas:**
   - **lineal:** Σ_k β_k z_k;
-  - **MLP:** una capa oculta con Tanh;
-  - **KAN:** una capa oculta de 2 nodos y 12 intervalos, con φ(x) = w_b·SiLU(x) + w_s·Σ c_i B_i(x).
+  - **MLP:** una capa oculta con Tanh (63 neuronas con q = 8, para igualar los parámetros de la KAN);
+  - **KAN:** una capa oculta de 4 nodos y 12 intervalos, con φ(x) = w_b·SiLU(x) + w_s·Σ c_i B_i(x).
 - **Decodificador:**
   - **FPCA con M = 5** (96,5 % de la varianza): media y funciones propias de las curvas de estaciones de entrenamiento, congeladas.
 - **Pérdida:** norma L² funcional (ĉ − c)ᵀ W (ĉ − c) más la penalización de rugosidad, en la escala √P. La predicción se recorta en 0 antes de volver a mm.
