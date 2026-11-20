@@ -600,21 +600,25 @@ X_matriz <- t(X_sat)
 colnames(Y_matriz) <- paste0("P", sprintf("%02d", tiempos))
 colnames(X_matriz) <- paste0("P", sprintf("%02d", tiempos))
 
-# Entrenamiento y validacion
+# Entrenamiento, validacion y prueba
 particion_metadatos <- particion_curva(metadatos$STATION_ID, metadatos$YEAR)
 table(particion_metadatos)
 Y_train <- Y_matriz[particion_metadatos == "entrenamiento", ]
 X_train <- X_matriz[particion_metadatos == "entrenamiento", ]
 Y_val <- Y_matriz[particion_metadatos == "validacion", ]
 X_val <- X_matriz[particion_metadatos == "validacion", ]
+Y_test <- Y_matriz[particion_metadatos == "prueba", ]
+X_test <- X_matriz[particion_metadatos == "prueba", ]
 
 nrow(Y_matriz)
 nrow(Y_train)
 nrow(Y_val)
+nrow(Y_test)
 
 # Guardar las matrices
 saveRDS(list(Y_matriz = Y_matriz, X_matriz = X_matriz, metadatos = metadatos,
-             Y_train = Y_train, X_train = X_train, Y_val = Y_val, X_val = X_val),
+             Y_train = Y_train, X_train = X_train, Y_val = Y_val, X_val = X_val,
+             Y_test = Y_test, X_test = X_test),
         "Curvas/matrices_funcionales.rds")
 
 # Pentadas faltantes por curva
