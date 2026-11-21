@@ -1604,7 +1604,7 @@ legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange
        lty = c(1, 2), lwd = 2, bty = "n")
 # La desviación estándar muestra la misma dispersión en mm y aumenta hacia noviembre (en ambas fuentes)
 # Ese aumento coincide con el segundo pico de la media y señala mayor diferencia entre curvas en esa temporada
-# El máximo del satélite es 16,01 mm en la péntada 62; el de estaciones es 26,04 mm en la primera péntada
+# El máximo del satélite es 16,15 mm en la péntada 62; el de estaciones es 26,20 mm en la primera péntada
 # Entonces, dos picos de lluvia media no implican que la mayor dispersión ocurra siempre en esos dos picos
 guardar_figura("05_exploratorio_varianza_desviacion.png", 12, 5)
 par(par_dispersion_eda)
@@ -1669,8 +1669,8 @@ for (fuente in names(covarianza_eda)) {
 }
 covariacion_temporadas_eda
 guardar_tabla(covariacion_temporadas_eda, "05_exploratorio_covariacion_abril_noviembre.csv")
-# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 321,89 mm^2 en estaciones
-# y 160,15 mm^2 en satélite; las correlaciones son 0,79 y 0,84, respectivamente
+# Entre esas péntadas de las dos temporadas lluviosas, la covarianza es 327,53 mm^2 en estaciones
+# y 162,62 mm^2 en satélite; las correlaciones son 0,79 y 0,84, respectivamente
 # Los pares estación-año con lluvia por encima de la media en abril tienden a estar también por encima
 # de la media de noviembre; la covarianza mayor de estaciones incluye su mayor dispersión
 # La correlación se calculó reuniendo estaciones y años; no muestra si la relación se mantiene
@@ -1713,7 +1713,7 @@ plot(pentadas_eda, diagonal_cruzada_eda, type = "l", lwd = 2, col = "darkblue", 
 abline(h = 0, lty = 3)
 guardar_figura("05_exploratorio_correlacion_cruzada.png", 12, 5)
 par(par_cor_cruzada_eda)
-# En la misma péntada, la correlación entre ambas fuentes varía de 0,32 a 0,69
+# En la misma péntada, la correlación entre ambas fuentes varía de 0,31 a 0,68
 # Los pares con más lluvia en una fuente tienden a mostrar más lluvia en la otra
 
 
@@ -1750,8 +1750,8 @@ for (fuente in names(curvas_eda_fd)) {
 tramos_derivada_eda
 guardar_tabla(tramos_derivada_eda, "05_exploratorio_tramos_derivada.csv")
 
-# En los tramos de descenso de mitad de año, la media baja de 29,52 a 12,12 mm en estaciones
-# y de 37,35 a 12,14 mm en satélite
+# En los tramos de descenso de mitad de año, la media baja de 30,07 a 12,28 mm en estaciones
+# y de 37,45 a 12,13 mm en satélite
 # El valle conserva lluvia; corresponde al periodo menos lluvioso entre las dos temporadas del ciclo bimodal
 
 # Inicio y fin según los cruces con la lluvia media del año
@@ -1788,7 +1788,7 @@ cruces_lluvia_eda
 temporadas_lluvia_eda
 guardar_tabla(cruces_lluvia_eda, "05_exploratorio_cruces_umbral_lluvia.csv")
 guardar_tabla(temporadas_lluvia_eda, "05_exploratorio_temporadas_lluvia.csv")
-# Con umbrales de 23,35 mm en estaciones y 25,08 mm en satélite, los dos tramos completos abarcan
+# Con umbrales de 23,69 mm en estaciones y 25,08 mm en satélite, los dos tramos completos abarcan
 # aproximadamente marzo-junio y septiembre-diciembre, con los picos de abril-mayo y noviembre dentro de ellos
 # Son periodos por encima del promedio de cada fuente; sus límites dependen del umbral y del suavizado
 # El cruce ascendente del satélite cerca de la péntada 71 queda sin cierre dentro del año
@@ -1914,8 +1914,8 @@ resumen_atipicas_eda <- profundidades_eda %>%
   summarize(curvas = n(), atipicas = sum(atipica), porcentaje = 100 * mean(atipica), .groups = "drop")
 resumen_atipicas_eda
 guardar_tabla(resumen_atipicas_eda, "05_exploratorio_resumen_atipicas.csv")
-# El boxplot señala 56 pares estación-año en estaciones y 26 en satélite
-# Representan el 1,96 % y el 0,91 % de las curvas de cada fuente, respectivamente
+# El boxplot señala 64 pares estación-año en estaciones y 28 en satélite
+# Representan el 2,04 % y el 0,89 % de las curvas de cada fuente, respectivamente
 
 atipicas_por_estacion_eda <- profundidades_eda %>%
   group_by(fuente, STATION_ID) %>%
@@ -1926,8 +1926,8 @@ atipicas_por_estacion_eda <- profundidades_eda %>%
   arrange(fuente, desc(atipicas))
 atipicas_por_estacion_eda
 guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.csv")
-# En tierra, la estación 5301500106, a 232 m, aparece señalada en sus 15 años disponibles
-# La estación 5301000104, a 20 m, aparece en sus 10 años en tierra y en 9 de los 10 en satélite
+# En tierra, la estación 5301500106, a 232 m, aparece señalada en 17 de sus 19 años disponibles
+# La estación 5301000104, a 20 m, aparece en sus 11 años en tierra y en 10 de los 11 en satélite
 # La repetición muestra que el boxplot detecta diferencias que persisten de algunos sitios frente a la red,
 # además de posibles años excepcionales; la marca no significa necesariamente un año anómalo para ese sitio
 # Hay casos terrestres a 20 m y a 2100 m, y estaciones sin altitud registrada
@@ -2222,7 +2222,7 @@ colnames(X1_pixeles) <- colnames(X2_pixeles) <- as.character(pixeles_unicos)
 colnames(coefs1_pixeles) <- colnames(coefs2_pixeles) <- as.character(pixeles_unicos)
 table(metadatos_pixeles$piso_altitudinal)
 
-# Estadístico t con varianza combinada y estadístico de tipo Welch T(t) para dos muestras (script_t-funcional.R)
+# Estadístico t con varianza combinada y estadístico de tipo Welch T(t) para dos muestras
 Estadisticos_t <- function(A, B) {
   nA <- ncol(A)
   nB <- ncol(B)
@@ -2409,7 +2409,7 @@ dev.off()
 # y Alta montaña (+2,24 mm, p = 0,0104) se compensa con la sobreestimación en Valle (-3,85 mm, p = 0,0002 en 107 de 143 puntos)
 # En el dominio andino >=700 m (P=140), T(t) supera c_maximo = 2,54 en cuatro tramos (53 puntos; p_global = 0,0002)
 
-# Diagnóstico de autocorrelación espacial entre píxeles vecinos (Índice de Moran, Script_Spatial_Analytics.R)
+# Diagnóstico de autocorrelación espacial entre píxeles vecinos (Índice de Moran)
 lat0_pixeles <- mean(metadatos_pixeles$latitud)
 x_pixeles_km <- metadatos_pixeles$longitud * 111.32 * cos(lat0_pixeles * pi / 180)
 y_pixeles_km <- metadatos_pixeles$latitud * 110.57
@@ -2591,7 +2591,7 @@ dev.off()
 # Valle (-3,85 mm/péntada; DE media 5,51 mm), Montaña media (-0,46 mm; DE 7,91 mm), Alta montaña (+2,24 mm; DE 11,18 mm)
 # y Pacífico bajo (+33,91 mm; DE 35,15 mm con P = 7 píxeles independientes en vez de S = 1 estación)
 
-# Función ANOVA funcional siguiendo script_ANOVA-funcional.R (SSR_t, SSE_t, SST_t, F_t, Zhang L2 y F_n,
+# Función ANOVA funcional (SSR_t, SSE_t, SST_t, F_t, Zhang L2 y F_n,
 # T_GPF de Zhang y Liang, permutación de etiquetas con c_maximo y prueba heterocedástica V_n de Cuevas et al., 2004)
 w_eda <- rep(1, length(pentadas_eda))
 w_eda[c(1, length(pentadas_eda))] <- 0.5
@@ -2876,7 +2876,7 @@ comparar_pares_pisos <- function(X, Grupo, obj_anova, nombre_esquema) {
     n_ab <- nA + nB
     est_ab <- Estadisticos_t(A, B_mat)
 
-    # Estadístico F de dos muestras con covarianza combinada global (script_ANOVA-funcional.R L473-477)
+    # Estadístico F de dos muestras con covarianza combinada global
     F_par_glob <- (nA * nB / (nA + nB)) * sum(w_eda * est_ab$dif^2) / obj_anova$tr_gamma
     p_F_glob <- pf(F_par_glob, obj_anova$d_hat, obj_anova$N_gl * obj_anova$d_hat, lower.tail = FALSE)
 

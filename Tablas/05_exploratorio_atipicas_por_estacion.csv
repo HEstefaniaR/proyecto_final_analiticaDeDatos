@@ -1,0 +1,12 @@
+"fuente","STATION_ID","curvas","atipicas","altitud_m"
+"satelital","5301100101",17,17,NA
+"satelital","5301000104",11,10,20
+"satelital","5301500106",19,1,232
+"terrestre","5301500106",19,17,232
+"terrestre","5301100101",17,14,NA
+"terrestre","5301000104",11,11,20
+"terrestre","5301500108",9,9,150
+"terrestre","5421200110",6,6,515
+"terrestre","2622100104",19,5,2100
+"terrestre","2612810108",23,1,1500
+"terrestre","5421200111",15,1,NA

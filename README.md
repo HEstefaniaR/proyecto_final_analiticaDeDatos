@@ -5,7 +5,7 @@
 **Universidad Autónoma de Occidente**<br>
 **Materia:** Analítica de Datos<br>
 **Estudiantes:** Mariana Cifuentes, John David Franco, Estefanía Hernández, Natalia Paredes<br>
-**Profesor:** Carlos Andrés Ferro Sánchez y Johann Alexis Ospina Galindez
+**Profesores:** Carlos Andrés Ferro Sánchez y Johann Alexis Ospina Galindez
 
 ---
 
@@ -173,8 +173,8 @@ Todo está en `data/`:
   - Las funciones de pesos tienen penalización de rugosidad.
 - **Cabezas:**
   - **lineal:** Σ_k β_k z_k;
-  - **MLP:** una capa oculta con Tanh (63 neuronas con q = 8, para igualar los parámetros de la KAN);
-  - **KAN:** una capa oculta de 4 nodos y 12 intervalos, con φ(x) = w_b·SiLU(x) + w_s·Σ c_i B_i(x).
+  - **MLP:** una capa oculta con Tanh (53 neuronas con q = 8, para igualar los parámetros de la KAN);
+  - **KAN:** una sola capa, sin capa oculta, de las q + 2 entradas a los M puntajes FPCA, con 12 intervalos y φ(x) = w_b·SiLU(x) + w_s·Σ c_i B_i(x) en cada arista. Es la arquitectura de menor pérdida de validación cruzada en la ablación del notebook 02.
 - **Decodificador:**
   - **FPCA con M = 5** (96,5 % de la varianza): media y funciones propias de las curvas de estaciones de entrenamiento, congeladas.
 - **Pérdida:** norma L² funcional (ĉ − c)ᵀ W (ĉ − c) más la penalización de rugosidad, en la escala √P. La predicción se recorta en 0 antes de volver a mm.
@@ -207,13 +207,31 @@ Todo está en `data/`:
 
 ## Parte 7 - Resultados de referencia
 
-**Partición**
+**Partición** (`Tablas/01_particion_estaciones.csv`)
 
-| Grupo | Estaciones sorteadas | Curvas estación-año |
-| --- | --- | --- |
-| Entrenamiento (1981–1995) | 135 | 1307 |
-| Validación (1996–2000) | 25 | 106 |
-| Prueba (2001–2003) | 24 | 60 |
+| Grupo | Estaciones sorteadas | Estaciones con curvas | Píxeles | Curvas estación-año |
+| --- | --- | --- | --- | --- |
+| Entrenamiento (1981–1997) | 160 | 143 | 120 | 1958 |
+| Prueba (1998–2003) | 29 | 26 | 22 | 127 |
 
+Las curvas de entrenamiento se reparten en 5 grupos de validación cruzada de 316 a 433 curvas.
 
-**Configuración elegida con validación:** q = 8 y M = 5. λ es 1 en la lineal, 10⁴ en la MLP y 10² en la KAN (`Tablas/08_red_configuracion_elegida.csv`).
+**Configuración elegida con validación cruzada:** q = 8 y M = 5. λ es 10 en la lineal y en la KAN y 100 en la MLP; el ajuste final usa 2756, 700 y 91 épocas, y las cabezas KAN y MLP tienen 850 y 853 parámetros (`Tablas/08_red_configuracion_elegida.csv`, `Tablas/08_red_parametros_cabezas.csv`).
+
+**Validación cruzada** (`Tablas/09_ablacion_cabezas_metricas.csv`, media de 3 semillas)
+
+| Modelo | L² relativo | KGE | Sesgo del acumulado | RECM (mm) |
+| --- | --- | --- | --- | --- |
+| Satélite sin corregir | 0,575 | 0,386 | +8,5 % | 16,17 |
+| Lineal | 0,416 | 0,533 | −6,9 % | 14,47 |
+| MLP | 0,380 | 0,572 | −4,9 % | 12,28 |
+| KAN | 0,368 | 0,597 | −4,2 % | 12,40 |
+
+**Prueba** (`04_Evaluacion_interpretacion.ipynb`, semilla elegida con la validación cruzada)
+
+| Modelo | L² relativo | KGE | Sesgo anual | Error de los dos picos (días) | RECM (mm) |
+| --- | --- | --- | --- | --- | --- |
+| Satélite sin corregir | 0,445 | 0,401 | +2,3 % | 22,95 | 13,94 |
+| Lineal | 0,393 | 0,456 | −14,3 % | 14,39 | 13,08 |
+| MLP | 0,356 | 0,510 | −9,5 % | 15,93 | 11,23 |
+| KAN | 0,363 | 0,493 | −6,6 % | 14,67 | 10,95 |

@@ -1,5 +1,6 @@
 import argparse
 import random
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -12,7 +13,8 @@ SEMILLAS = (1, 2, 3)  # 0001, 0002, 0003
 # Parámetros ajustables: cambiar OCULTAS tras conocer los parámetros de la cabeza KAN
 OCULTAS = 8
 ACTIVACION = nn.Tanh
-OCULTAS_KAN = 4
+# Nodos de la capa oculta de la KAN; con 0 no hay capa oculta (elegida en la ablación del notebook 02)
+OCULTAS_KAN = 0
 INTERVALOS_KAN = 12
 
 # Entrenamiento de la red funcional
@@ -65,7 +67,8 @@ def cargar_datos(carpeta='Curvas'):
     if not all(np.isfinite(x).all() for x in (c, cov, t, phi)): raise ValueError('Hay entradas faltantes o no finitas.')
     if not np.all(np.diff(t) > 0) or abs(t[0]) > 1e-9 or abs(t[-1]-72) > 1e-9:
         raise ValueError('La malla de integración debe cubrir [0,72] en orden creciente.')
-    return {'curva': datos.curva.to_numpy(), 'particion': particion, 'c': c, 'cov': cov, 't': t, 'phi': phi, 'k_est': int(k_est.iloc[0])}
+    return {'curva': datos.curva.to_numpy(), 'particion': particion, 'YEAR': datos.YEAR.to_numpy(),
+            'STATION_ID': datos.STATION_ID.to_numpy(), 'c': c, 'cov': cov, 't': t, 'phi': phi, 'k_est': int(k_est.iloc[0])}
 
 # Gram W y rugosidad R por cuadratura
 def matrices_integracion(t, phi):
@@ -252,16 +255,14 @@ class CapaKAN(nn.Module):
         return base + self.peso_spline[salida, entrada] * spline
 
 
-# Composición de dos capas KAN, de q+2 entradas a M coordenadas FPCA
+# Cabeza KAN de q+2 entradas a M coordenadas FPCA: una capa sin nodos ocultos, o dos capas con una oculta
 class CabezaKAN(nn.Module):
     def __init__(self, neuronas=8, m_fpca=5, ocultas=OCULTAS_KAN, intervalos=INTERVALOS_KAN):
         super().__init__()
         if neuronas not in NEURONAS or m_fpca not in COMPONENTES:
             raise ValueError('Se requiere q=6..8 y M=4..6.')
-        self.capas = nn.ModuleList([
-            CapaKAN(neuronas + 2, ocultas, intervalos),
-            CapaKAN(ocultas, m_fpca, intervalos),
-        ])
+        tamanos = [neuronas + 2] + ([ocultas] if ocultas else []) + [m_fpca]
+        self.capas = nn.ModuleList([CapaKAN(a, b, intervalos) for a, b in zip(tamanos[:-1], tamanos[1:])])
 
     def forward(self, h):
         for capa in self.capas:
@@ -680,6 +681,35 @@ def grafica_historial(tabla, archivo):
     fig.tight_layout(); fig.savefig(archivo, dpi=150); plt.close(fig)
     return archivo
 
+# Búsqueda en un grupo de la validación cruzada: todas las cabezas, q, M, lambda y semillas
+# El normalizador, la FPCA y la calibración de la KAN se ajustan con los otros grupos; el grupo que queda fuera
+# sirve para la parada temprana y para medir la pérdida. Cada proceso usa un hilo, porque con estos modelos
+# pequeños más hilos no aceleran una época
+def buscar_en_grupo(grupo, datos, neuronas, componentes, lambdas, semillas, epocas):
+    torch.set_num_threads(1)
+    gram_s, rugosidad_s = matrices_integracion(datos['t'], datos['phi_sat'])
+    gram_e, _ = matrices_integracion(datos['t'], datos['phi_est'])
+    entrenamiento = datos['particion'] == 'entrenamiento'
+    tr = entrenamiento & (datos['grupo_vc'] != grupo)
+    va = entrenamiento & (datos['grupo_vc'] == grupo)
+    cov_norm = NormalizadorCovariables().ajustar(datos['cov'], tr).transformar(datos['cov'])
+    fpcas = {m: preparar_fpca(datos, m, tr) for m in componentes}
+    filas, predicciones = [], {}
+    for cabeza in ('lineal', 'MLP', 'KAN'):
+        for q in neuronas:
+            for m in componentes:
+                fpca, mu_c, psi_c, _ = fpcas[m]
+                for lam in lambdas:
+                    for semilla in semillas:
+                        modelo, perdida, resumen, _ = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s, rugosidad_s,
+                                                                   gram_e, fpca, mu_c, psi_c, cov_norm, tr, va, epocas)
+                        with torch.no_grad():
+                            predicciones[(cabeza, q, m, lam, semilla)] = perdida.coeficientes(
+                                modelo(torch.as_tensor(datos['c_sat'][va]), torch.as_tensor(cov_norm[va]))).numpy()
+                        filas.append({'fold': grupo, 'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam, 'semilla': semilla,
+                                      'curvas_ajuste': int(tr.sum()), 'curvas_validacion': int(va.sum()), **resumen})
+    return filas, predicciones
+
 # Ejecución: búsqueda de q y lambda por validación cruzada de 5 grupos de estaciones y ajuste final
 # En cada grupo, el normalizador, la FPCA y la calibración de la KAN se ajustan solo con los otros cuatro
 # El grupo que queda fuera sirve para la parada temprana y para medir la pérdida
@@ -719,34 +749,21 @@ def main_entrenamiento(escala=ESCALA, carpeta='Curvas', neuronas=NEURONAS, compo
     grafica_sedimentacion(explicada[:k_est], max(componentes), f'Figuras/{prefijo}_fpca_sedimentacion.png')
 
     # Búsqueda de hiperparámetros: las mismas q, M, lambda, semillas y grupos para las tres cabezas
+    # Los grupos se entrenan a la vez, cada uno en su propio proceso
     # Se guarda la predicción de cada grupo cuando queda fuera (coeficientes en la escala del modelo)
+    with ProcessPoolExecutor(max_workers=n_folds) as ejecutor:
+        resultados = list(ejecutor.map(buscar_en_grupo, range(1, n_folds + 1), [datos] * n_folds, [neuronas] * n_folds,
+                                       [componentes] * n_folds, [lambdas] * n_folds, [semillas] * n_folds,
+                                       [epocas] * n_folds))
     busqueda, fuera_de_grupo = [], {}
-    for grupo in range(1, n_folds + 1):
-        tr = entrenamiento & (grupos != grupo)
+    for grupo, (filas, predicciones) in enumerate(resultados, 1):
         va = entrenamiento & (grupos == grupo)
-        cov_norm = NormalizadorCovariables().ajustar(datos['cov'], tr).transformar(datos['cov'])
-        fpcas = {m: preparar_fpca(datos, m, tr) for m in componentes}
-        for cabeza in cabezas:
-            for q in neuronas:
-                for m in componentes:
-                    fpca, mu_c, psi_c, _ = fpcas[m]
-                    for lam in lambdas:
-                        for semilla in semillas:
-                            modelo, perdida, resumen, _ = entrenar_red(cabeza, q, m, lam, semilla, datos, gram_s,
-                                                                       rugosidad_s, gram_e, fpca, mu_c, psi_c,
-                                                                       cov_norm, tr, va, epocas)
-                            clave = (cabeza, q, m, lam, semilla)
-                            if clave not in fuera_de_grupo:
-                                fuera_de_grupo[clave] = np.full(datos['c_est'].shape, np.nan)
-                            with torch.no_grad():
-                                fuera_de_grupo[clave][va] = perdida.coeficientes(
-                                    modelo(torch.as_tensor(datos['c_sat'][va]), torch.as_tensor(cov_norm[va]))).numpy()
-                            busqueda.append({'fold': grupo, 'cabeza': cabeza, 'q': q, 'M': m, 'lambda': lam,
-                                             'semilla': semilla, 'curvas_ajuste': int(tr.sum()),
-                                             'curvas_validacion': int(va.sum()), **resumen})
-                            print(f'fold {grupo} {cabeza} q={q} M={m} lambda={lam} semilla={semilla:04d}: '
-                                  f'validación={resumen["perdida_validacion"]:.4f} (época {resumen["mejor_epoca"]})',
-                                  flush=True)
+        busqueda += filas
+        for clave, prediccion in predicciones.items():
+            if clave not in fuera_de_grupo:
+                fuera_de_grupo[clave] = np.full(datos['c_est'].shape, np.nan)
+            fuera_de_grupo[clave][va] = prediccion
+        print(f'Grupo {grupo}: {len(filas)} entrenamientos', flush=True)
     tabla_busqueda = pd.DataFrame(busqueda)
     tabla_busqueda.to_csv(f'Tablas/{prefijo}_busqueda_hiperparametros.csv', index=False)
     resumen = (tabla_busqueda.groupby(['cabeza', 'q', 'M', 'lambda'])

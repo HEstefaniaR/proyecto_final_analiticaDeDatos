@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 import torch
@@ -50,6 +51,7 @@ def preparar_datos(carpeta_curvas='Curvas', carpeta_datos='data'):
     va = tr.copy()
     t_fina, filas = datos['t'], datos['filas_pentadas']
     D = dict(datos=datos, meta=meta, tr=tr, va=va, grupo=datos['grupo_vc'], t_fina=t_fina, filas=filas,
+             carpetas=(str(carpeta_curvas), str(carpeta_datos)),
              phi_s_f=datos['phi_sat'], phi_e_f=datos['phi_est'],
              phi_s=datos['phi_sat'][filas], phi_e=datos['phi_est'][filas])
     D['W_s'], D['R_s'] = Mo.matrices_integracion(t_fina, D['phi_s_f'])
@@ -187,13 +189,32 @@ def entrenar_grupo(D, grupo, cabeza, q, m, semilla, oni, anchos, intervalos, q_o
     with torch.no_grad(): c_hat = perdida.coeficientes(red(*x_va)).numpy()
     return red, c_hat, mejor, ep_m
 
+# Los 5 grupos se entrenan a la vez en procesos que siguen abiertos durante todo el notebook;
+# cada proceso prepara sus datos una vez y usa un hilo
+_procesos = None
+_D_proceso = None
+
+def _iniciar_proceso(carpeta_curvas, carpeta_datos):
+    global _D_proceso
+    torch.set_num_threads(1)
+    _D_proceso = preparar_datos(carpeta_curvas, carpeta_datos)
+
+def _entrenar_grupo_proceso(argumentos_grupo):
+    red, c_g, mejor, ep = entrenar_grupo(_D_proceso, *argumentos_grupo)
+    return red.state_dict(), c_g, mejor, ep
+
 # Validación cruzada de una configuración: una red por grupo y la predicción de cada curva de entrenamiento
 # hecha por la red que no la vio. L2_validacion es la pérdida media de las curvas que quedan fuera
 def entrenar(D, cabeza, q, m, semilla, oni='promedio anual', anchos=(2,), intervalos=12, q_oni=2):
+    global _procesos
+    if _procesos is None:
+        _procesos = ProcessPoolExecutor(max_workers=GRUPOS, initializer=_iniciar_proceso, initargs=D['carpetas'])
+    tareas = [(grupo, cabeza, q, m, semilla, oni, anchos, intervalos, q_oni) for grupo in range(1, GRUPOS + 1)]
     c_hat = np.full(D['datos']['c_est'].shape, np.nan)
     redes, perdidas, curvas, epocas = [], [], [], []
-    for grupo in range(1, GRUPOS + 1):
-        red, c_g, mejor, ep = entrenar_grupo(D, grupo, cabeza, q, m, semilla, oni, anchos, intervalos, q_oni)
+    for grupo, (estado, c_g, mejor, ep) in enumerate(_procesos.map(_entrenar_grupo_proceso, tareas), 1):
+        red = construir_red(D, cabeza, q, m, oni, anchos, intervalos, q_oni)
+        red.load_state_dict(estado)
         c_hat[curvas_grupo(D, grupo)[1]] = c_g
         redes.append(red); perdidas.append(mejor); curvas.append(len(c_g)); epocas.append(ep)
     fp = fpca_estaciones(D, m, D['tr'])[0]

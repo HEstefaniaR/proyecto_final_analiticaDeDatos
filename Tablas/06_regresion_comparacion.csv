@@ -1,0 +1,4 @@
+"modelo","log10_lambda","RMSE_VC_mm","sesgo_acumulado_VC_pct","R2_medio_entrenamiento"
+"Funcion a funcion",3,14.5521993330776,-6.9648635702446,0.423398334292016
+"Concurrente con covariables",4,16.242310787718,-7.6369550917622,0.29039146862007
+"Satelite sin corregir",NA,16.1713752492848,8.47983710097326,NA
