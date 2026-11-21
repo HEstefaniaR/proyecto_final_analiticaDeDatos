@@ -1,0 +1,5 @@
+modelo,L2_relativo,RECM_mm,KGE,sesgo_anual_pct,error_Pico_1_MarJun_dias,error_Pico_2_SepDic_dias,error_dos_picos_dias
+KAN_s2,0.3629,10.9466,0.4933,-6.6119,20.0394,9.2913,14.6654
+MLP_s1,0.3559,11.2297,0.5099,-9.4877,21.1417,10.7087,15.9252
+Satelite,0.4453,13.9368,0.4006,2.3334,16.5354,29.3701,22.9528
+lineal_s1,0.3926,13.0752,0.4562,-14.2841,19.4882,9.2913,14.3898

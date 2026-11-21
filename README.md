@@ -101,6 +101,7 @@ Los nombres de las tablas y figuras empiezan por el número de la fase:
 | `08` | Red |
 | `09` | Ablación de cabezas |
 | `10` | Diagnóstico de atenuación de la KAN |
+| `11` | Evaluación en prueba |
 
 
 ---
