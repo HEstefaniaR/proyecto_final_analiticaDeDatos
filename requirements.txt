@@ -4,3 +4,5 @@ pandas
 torch
 ipykernel
 scipy
+streamlit
+plotly

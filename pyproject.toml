@@ -10,4 +10,6 @@ dependencies = [
     "matplotlib>=3.8",
     "ipykernel>=6.29",
     "scipy>=1.11",
+    "streamlit>=1.65.0",
+    "plotly>=7.1.0",
 ]

@@ -1609,6 +1609,40 @@ legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange
 guardar_figura("05_exploratorio_varianza_desviacion.png", 12, 5)
 par(par_dispersion_eda)
 
+# Curvas de cada año con su media y su desviación estándar, un panel por año (Ospina Galíndez, 2016)
+# El título da la fase ENSO del año según el ONI promedio: El Niño desde 0,5, La Niña desde -0,5 y Neutral entre ambos
+# Todos los paneles de una fuente tienen la misma escala, hasta su valor máximo y como mucho 350 mm;
+# en estaciones solo sale del eje el inicio de una curva de 1982 (5421200110), con un borde de 528 mm
+anios_eda <- sort(unique(metadatos_eda$YEAR))
+oni_anio_eda <- oni_anual$oni_promedio[match(anios_eda, oni_anual$YEAR)]
+fase_anio_eda <- ifelse(oni_anio_eda >= 0.5, "El Niño", ifelse(oni_anio_eda <= -0.5, "La Niña", "Neutral"))
+nombres_fuente_eda <- c(terrestre = "Estaciones", satelital = "Satélite")
+for (fuente in names(valores_eda)) {
+  limite_y <- c(min(valores_eda[[fuente]]), min(max(valores_eda[[fuente]]), 350))
+  png(paste0("Figuras/05_exploratorio_curvas_por_anio_", fuente, ".png"), width = 18, height = 11, units = "in", res = 150)
+  par(mfrow = c(4, 6), mar = c(3.5, 3.5, 2.5, 0.5), mgp = c(2, 0.6, 0), oma = c(0, 0, 3, 0))
+  for (k in seq_along(anios_eda)) {
+    curvas_anio <- valores_eda[[fuente]][, metadatos_eda$YEAR == anios_eda[k], drop = FALSE]
+    matplot(pentadas_eda, curvas_anio, type = "l", lty = 1, col = "grey85", ylim = limite_y,
+            xlab = "Péntada", ylab = "Precipitación (mm)",
+            main = paste0(anios_eda[k], ": ", fase_anio_eda[k], " (ONI ",
+                          format(round(oni_anio_eda[k], 2), nsmall = 2, decimal.mark = ","), ")"))
+    lines(pentadas_eda, rowMeans(curvas_anio), lwd = 2.5, col = "red")
+    lines(pentadas_eda, apply(curvas_anio, 1, sd), lwd = 2.5, lty = 2, col = "darkblue")
+  }
+  plot.new()
+  legend("center", c("Curvas del año", "Media", "Desviación estándar"), col = c("grey85", "red", "darkblue"),
+         lty = c(1, 1, 2), lwd = c(1, 2.5, 2.5), bty = "n", cex = 1.5)
+  mtext(paste0(nombres_fuente_eda[fuente], ": curvas por año, media y desviación estándar",
+               if (max(valores_eda[[fuente]]) > 350) " (eje hasta 350 mm)" else ""), outer = TRUE, cex = 1.4)
+  dev.off()
+}
+# En el satélite el régimen bimodal se repite todos los años, con picos cerca de las péntadas 25 y 60 y poca dispersión
+# En estaciones la media también tiene dos temporadas, pero es más plana: la desviación estándar es parecida a la media
+# porque cada año unas pocas estaciones llueven mucho más que el resto
+# La fase ENSO no cambia la forma bimodal; las diferencias entre años están en la altura y la anchura de las temporadas,
+# como en 1999 (La Niña), cuando la primera temporada es más ancha y la lluvia media de estaciones es alta desde enero
+
 
 # Covarianza y correlación funcionales de cada fuente
 covarianza_eda <- list()
@@ -1899,8 +1933,8 @@ atipicas_eda <- profundidades_eda %>%
   filter(atipica) %>%
   arrange(fuente, STATION_ID, YEAR) %>%
   select(-atipica) %>%
-  left_join(metadatos_eda[, c("curva", "altitud")], by = "curva") %>%
-  rename(altitud_m = altitud) %>%
+  left_join(metadatos_eda[, c("curva", "altitud_completa", "fuente_altitud")], by = "curva") %>%
+  rename(altitud_m = altitud_completa) %>%
   left_join(enso_anual[, c("YEAR", "secuencia_fases")], by = "YEAR") %>%
   as.data.frame()
 atipicas_eda
@@ -1921,8 +1955,8 @@ atipicas_por_estacion_eda <- profundidades_eda %>%
   group_by(fuente, STATION_ID) %>%
   summarize(curvas = n(), atipicas = sum(atipica), .groups = "drop") %>%
   filter(atipicas > 0) %>%
-  left_join(unique(metadatos_eda[, c("STATION_ID", "altitud")]), by = "STATION_ID") %>%
-  rename(altitud_m = altitud) %>%
+  left_join(unique(metadatos_eda[, c("STATION_ID", "altitud_completa", "fuente_altitud")]), by = "STATION_ID") %>%
+  rename(altitud_m = altitud_completa) %>%
   arrange(fuente, desc(atipicas))
 atipicas_por_estacion_eda
 guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.csv")
@@ -1930,7 +1964,7 @@ guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.
 # La estación 5301000104, a 20 m, aparece en sus 11 años en tierra y en 10 de los 11 en satélite
 # La repetición muestra que el boxplot detecta diferencias que persisten de algunos sitios frente a la red,
 # además de posibles años excepcionales; la marca no significa necesariamente un año anómalo para ese sitio
-# Hay casos terrestres a 20 m y a 2100 m, y estaciones sin altitud registrada
+# Hay casos terrestres desde 20 m hasta 2100 m; algunas estaciones tienen la altitud tomada del modelo digital de elevación
 
 
 #################### Comparación funcional por fuente ####################

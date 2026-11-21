@@ -81,6 +81,7 @@ proyecto_final_analiticaDeDatos/
 ├── Tablas/ 
 ├── Figuras/
 ├── predicciones_estaciones_reservadas.csv  # Predicciones de las estaciones de prueba (KAN)
+├── visualizador.py                     # Visualizador en Streamlit de las estaciones de prueba
 ├── documentos/AI Usage.md              # Declaración de uso de IA e informe
 ├── pyproject.toml                      
 └── README.md
@@ -158,6 +159,7 @@ Todo está en `data/`:
    - Verificación de S, covarianza residual y bandas de confianza punto a punto.
 8. **Análisis exploratorio funcional.**
    - Media verificada contra `fda`, varianza, covarianza, correlación y derivadas.
+   - Curvas de cada año con su media y su desviación estándar, un panel por año con la fase ENSO según el ONI promedio (`05_exploratorio_curvas_por_anio_terrestre.png` y `05_exploratorio_curvas_por_anio_satelital.png`).
    - Profundidades de Fraiman–Muniz y MBD, y boxplot funcional con las curvas atípicas.
 9. **Comparación funcional por fuente.**
    - Diferencia d(t) con su banda ± 2 EE y los tramos donde la banda no contiene el cero.
@@ -204,6 +206,13 @@ Todo está en `data/`:
 | `year` | Año |
 | `day` | Día del año en que empieza la péntada (1, 6, …, 26, 32, …) |
 | `value_mm` | Lluvia total predicha en la péntada (mm) |
+
+
+**Visualizador.** `visualizador.py` muestra en un mapa del Valle del Cauca las 26 estaciones de prueba (1998–2003), coloreadas por la RECM de la KAN, con las estaciones de entrenamiento en gris como referencia. La barra de años, o un clic sobre la serie del ONI promedio, elige el año; al pasar el cursor por una estación se ve su curva (KAN, estación y satélite), y al pasar por la curva, la péntada con sus días. Usa los archivos de `Curvas/`, `predicciones_estaciones_reservadas.csv` y `data/oni_anual.csv`, y necesita internet para el mapa base (CARTO) y el relieve (OpenTopoMap):
+
+```bash
+uv run streamlit run visualizador.py
+```
 
 ## Parte 7 - Resultados de referencia
 
