@@ -1,0 +1,7 @@
+"esquema","Fuente","gl","SC_integrada","CM_integrado","F_n","gl1_adj","gl2_adj","Valor_p_param","Valor_p_perm"
+"E5: Dominio andino 3 pisos (>=700 m, P=140)","Entre grupos",2,113542.324861317,56771.1624306587,5.95395027982246,2.76641526034935,189.49944533393,0.000951391849311819,0.0021995600879824
+"E5: Dominio andino 3 pisos (>=700 m, P=140)","Dentro de grupos",137,1306300.67223742,9535.04140319285,NA,NA,NA,NA,NA
+"E5: Dominio andino 3 pisos (>=700 m, P=140)","Total",139,1419842.99709874,NA,NA,NA,NA,NA,NA
+"E3b: Red completa 4 pisos (P=147)","Entre grupos",3,1352366.02823993,450788.676079977,33.4819522048869,4.3538547825463,207.533744634707,8.29377054656798e-23,0.0001999600079984
+"E3b: Red completa 4 pisos (P=147)","Dentro de grupos",143,1925299.3458974,13463.6317894923,NA,NA,NA,NA,NA
+"E3b: Red completa 4 pisos (P=147)","Total",146,3277665.37413733,NA,NA,NA,NA,NA,NA

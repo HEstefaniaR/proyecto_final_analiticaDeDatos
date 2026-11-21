@@ -1934,21 +1934,230 @@ guardar_tabla(atipicas_por_estacion_eda, "05_exploratorio_atipicas_por_estacion.
 
 
 #################### Comparación funcional por fuente ####################
-##### Comparación funcional entre estación y satélite #####
-# Diferencias anuales de la red completa
-stopifnot(identical(colnames(diferencia_curvas_eda), as.character(metadatos_eda$curva)),
-          !anyDuplicated(metadatos_eda[, c("STATION_ID", "YEAR")]))
-diferencia_por_anio <- function(incluir, anios) {
-  sapply(anios, function(anio) {
-    pares <- which(incluir & metadatos_eda$YEAR == anio)
-    rowMeans(diferencia_curvas_eda[, pares, drop = FALSE])
-  })
-}
-anios_red <- sort(unique(metadatos_eda$YEAR))
-D_red <- diferencia_por_anio(rep(TRUE, nrow(metadatos_eda)), anios_red)
-n_red <- length(anios_red)
+##### Colapso a píxel-año único y suavizado simétrico #####
+# Dispersión entre estaciones que comparten un mismo píxel CHIRPS y año
+clave_pixel_anio <- paste(metadatos_eda$pixel, metadatos_eda$YEAR, sep = "_")
+estaciones_unicas_eda <- unique(metadatos_eda[, c("STATION_ID", "pixel", "altitud_completa", "altitud_DEM")])
+conteo_estaciones_pixel <- table(estaciones_unicas_eda$pixel)
+pixeles_compartidos_eda <- sort(as.numeric(names(conteo_estaciones_pixel[conteo_estaciones_pixel > 1])))
 
-# Prueba t pareada de la red con un signo por curva anual
+dispersion_intrapixel <- do.call(rbind, lapply(pixeles_compartidos_eda, function(px) {
+  est_px <- estaciones_unicas_eda[estaciones_unicas_eda$pixel == px, ]
+  claves_px <- unique(clave_pixel_anio[metadatos_eda$pixel == px])
+  claves_activas <- claves_px[sapply(claves_px, function(cl) sum(clave_pixel_anio == cl) >= 2)]
+  de_pentadas <- numeric()
+  rangos_anuales <- numeric()
+  for (cl in claves_activas) {
+    filas <- which(clave_pixel_anio == cl)
+    matriz_px <- fuentes_eda$terrestre[filas, , drop = FALSE]
+    de_pentadas <- c(de_pentadas, apply(matriz_px, 2, sd, na.rm = TRUE))
+    totales_anuales <- rowSums(matriz_px, na.rm = TRUE)
+    rangos_anuales <- c(rangos_anuales, max(totales_anuales) - min(totales_anuales))
+  }
+  data.frame(
+    pixel = px,
+    estaciones = nrow(est_px),
+    pares_pixel_anio = length(claves_activas),
+    altitud_min_m = min(est_px$altitud_completa, na.rm = TRUE),
+    altitud_max_m = max(est_px$altitud_completa, na.rm = TRUE),
+    desnivel_m = max(est_px$altitud_completa, na.rm = TRUE) - min(est_px$altitud_completa, na.rm = TRUE),
+    DE_intrapixel_media_mm = mean(de_pentadas, na.rm = TRUE),
+    DE_intrapixel_max_mm = max(de_pentadas, na.rm = TRUE),
+    rango_anual_medio_mm = mean(rangos_anuales, na.rm = TRUE)
+  )
+}))
+dispersion_intrapixel
+guardar_tabla(dispersion_intrapixel, "06_comparacion_dispersion_intrapixel.csv")
+# En los 24 píxeles compartidos por 53 estaciones (362 pares píxel-año con dos o más estaciones activas),
+# el desnivel interno varía de 5 a 827 m (mediana 103,5 m) y la DE intra-píxel media por péntada va de
+# 2,96 a 35,44 mm (mediana 8,44 mm; media 9,54 mm), cuantificando la diferencia de soporte entre
+# pluviómetros puntuales y el promedio areal del píxel de 0,05 grados
+
+# Matrices colapsadas a nivel de píxel-año único con las mismas péntadas observadas en ambas fuentes
+claves_pixel_anio <- unique(clave_pixel_anio)
+indices_por_clave <- split(seq_len(nrow(metadatos_eda)), factor(clave_pixel_anio, levels = claves_pixel_anio))
+metadatos_comparacion <- do.call(rbind, lapply(seq_along(claves_pixel_anio), function(k) {
+  idx <- indices_por_clave[[k]]
+  sub <- metadatos_eda[idx, , drop = FALSE]
+  part_sub <- unique(particion_curva(sub$STATION_ID, sub$YEAR))
+  stopifnot(length(part_sub) == 1)
+  data.frame(
+    clave_pixel_anio = claves_pixel_anio[k],
+    pixel = sub$pixel[1],
+    YEAR = sub$YEAR[1],
+    estaciones_en_pixel = nrow(sub),
+    longitud = mean(sub$longitud),
+    latitud = mean(sub$latitud),
+    altitud_completa = if (all(is.na(sub$altitud_completa))) NA_real_ else mean(sub$altitud_completa, na.rm = TRUE),
+    altitud_DEM = mean(sub$altitud_DEM, na.rm = TRUE),
+    particion = part_sub
+  )
+}))
+rownames(metadatos_comparacion) <- NULL
+
+Y_pixel_anio <- t(sapply(indices_por_clave, function(idx) {
+  if (length(idx) == 1) fuentes_eda$terrestre[idx, ] else colMeans(fuentes_eda$terrestre[idx, , drop = FALSE], na.rm = TRUE)
+}))
+Y_pixel_anio[is.nan(Y_pixel_anio)] <- NA_real_
+X_pixel_anio <- t(sapply(indices_por_clave, function(idx) {
+  if (length(idx) == 1) fuentes_eda$satelital[idx, ] else colMeans(fuentes_eda$satelital[idx, , drop = FALSE], na.rm = TRUE)
+}))
+X_pixel_anio[is.na(Y_pixel_anio)] <- NA_real_
+rownames(Y_pixel_anio) <- metadatos_comparacion$clave_pixel_anio
+rownames(X_pixel_anio) <- metadatos_comparacion$clave_pixel_anio
+colnames(Y_pixel_anio) <- colnames(fuentes_eda$terrestre)
+colnames(X_pixel_anio) <- colnames(fuentes_eda$satelital)
+D_pixel_anio <- Y_pixel_anio - X_pixel_anio
+c(pares_pixel_anio = nrow(metadatos_comparacion), pixeles_unicos = n_distinct(metadatos_comparacion$pixel))
+table(metadatos_comparacion$particion)
+# El colapso reduce los 3139 pares estación-año (176 estaciones) a 2721 pares píxel-año en 147 píxeles únicos
+# (1690 en entrenamiento, 110 en prueba y 921 fuera de la partición del modelo)
+
+# Suavizado simétrico con la misma base B-spline cúbica y lambda común elegido por VCG en entrenamiento
+suavizar_comparacion <- function(datos, base, lambda) {
+  fd_par <- fdPar(base, int2Lfd(2), lambda)
+  completas <- which(rowSums(is.na(datos)) == 0)
+  incompletas <- which(rowSums(is.na(datos)) > 0)
+  coeficientes <- matrix(NA_real_, base$nbasis, nrow(datos),
+                         dimnames = list(NULL, rownames(datos)))
+  vcg <- numeric(nrow(datos))
+  gl <- numeric(nrow(datos))
+  if (length(completas) > 0) {
+    ajuste <- smooth.basis(tiempos, t(datos[completas, , drop = FALSE]), fd_par)
+    coeficientes[, completas] <- ajuste$fd$coefs
+    vcg[completas] <- ajuste$gcv
+    gl[completas] <- ajuste$df
+  }
+  for (i in incompletas) {
+    obs <- which(!is.na(datos[i, ]))
+    ajuste <- smooth.basis(tiempos[obs], datos[i, obs], fd_par)
+    coeficientes[, i] <- ajuste$fd$coefs[, 1]
+    vcg[i] <- ajuste$gcv
+    gl[i] <- ajuste$df
+  }
+  list(fd = fd(coeficientes, base, list("Péntada", rownames(datos), "Precipitación (mm)")),
+       gcv = sum(vcg), df = mean(gl))
+}
+
+en_entrenamiento_comp <- metadatos_comparacion$particion == "entrenamiento"
+log_lambda_comp <- seq(-1, 5, by = 0.25)
+tabla_vcg_comparacion <- do.call(rbind, lapply(log_lambda_comp, function(ll) {
+  lam <- 10^ll
+  aj_est <- suavizar_comparacion(Y_pixel_anio[en_entrenamiento_comp, , drop = FALSE], base_bspline, lam)
+  aj_sat <- suavizar_comparacion(X_pixel_anio[en_entrenamiento_comp, , drop = FALSE], base_bspline, lam)
+  aj_dif <- suavizar_comparacion(D_pixel_anio[en_entrenamiento_comp, , drop = FALSE], base_bspline, lam)
+  data.frame(
+    log10_lambda = ll,
+    lambda = lam,
+    gl_efectivos = aj_est$df,
+    VCG_estaciones = aj_est$gcv,
+    VCG_satelite = aj_sat$gcv,
+    VCG_total = aj_est$gcv + aj_sat$gcv,
+    VCG_diferencia = aj_dif$gcv
+  )
+}))
+tabla_vcg_comparacion
+guardar_tabla(tabla_vcg_comparacion, "06_comparacion_VCG_suavizado_simetrico.csv")
+
+idx_opt_comp <- which.min(tabla_vcg_comparacion$VCG_total)
+log_lambda_opt <- tabla_vcg_comparacion$log10_lambda[idx_opt_comp]
+lambda_opt <- tabla_vcg_comparacion$lambda[idx_opt_comp]
+gl_opt <- tabla_vcg_comparacion$gl_efectivos[idx_opt_comp]
+tabla_vcg_comparacion[idx_opt_comp, ]
+
+png("Figuras/06_comparacion_VCG_lambda_comun.png", width = 6.5, height = 4.5, units = "in", res = 150)
+plot(tabla_vcg_comparacion$log10_lambda, tabla_vcg_comparacion$VCG_total, type = "b", pch = 19,
+     xlab = "log10(lambda)", ylab = "VCG total (estaciones + satélite)",
+     main = "Selección de lambda común para comparación funcional")
+abline(v = log_lambda_opt, col = "red", lty = 2, lwd = 2)
+dev.off()
+# La VCG conjunta sobre los 1690 pares píxel-año de entrenamiento selecciona log10(lambda) = 2,25
+# (lambda = 177,83; 7,96 grados de libertad efectivos) para suavizar ambas fuentes con el mismo operador
+
+ajuste_comp_est <- suavizar_comparacion(Y_pixel_anio, base_bspline, lambda_opt)
+ajuste_comp_sat <- suavizar_comparacion(X_pixel_anio, base_bspline, lambda_opt)
+ajuste_comp_dif <- suavizar_comparacion(D_pixel_anio, base_bspline, lambda_opt)
+valores_comparacion <- list(
+  terrestre = eval.fd(pentadas_eda, ajuste_comp_est$fd),
+  satelital = eval.fd(pentadas_eda, ajuste_comp_sat$fd)
+)
+diferencia_comparacion <- eval.fd(pentadas_eda, ajuste_comp_dif$fd)
+error_linealidad_comp <- max(abs((valores_comparacion$terrestre - valores_comparacion$satelital) - diferencia_comparacion))
+error_linealidad_comp
+stopifnot(error_linealidad_comp < 1e-11)
+# La diferencia máxima entre restar las curvas suavizadas con el mismo operador y suavizar directamente
+# las diferencias discretas es 2,56e-13 mm en los 143 puntos y 2721 pares píxel-año
+
+# Sensibilidad a lambda (lambda/10, lambda óptimo y 10*lambda) frente a datos discretos y suavizado asimétrico
+if (!exists("diferencia_curvas_eda")) {
+  diferencia_curvas_eda <- valores_eda$terrestre - valores_eda$satelital
+}
+media_discreta_comp <- colMeans(D_pixel_anio, na.rm = TRUE)
+idx_72_comp <- match(tiempos, pentadas_eda)
+diferencia_asimetrica_pa <- t(sapply(indices_por_clave, function(idx) {
+  if (length(idx) == 1) diferencia_curvas_eda[idx_72_comp, idx] else rowMeans(diferencia_curvas_eda[idx_72_comp, idx, drop = FALSE])
+}))
+media_asimetrica_pa <- colMeans(diferencia_asimetrica_pa)
+media_asimetrica_pares <- rowMeans(diferencia_curvas_eda[idx_72_comp, ])
+aj_dif_bajo <- suavizar_comparacion(D_pixel_anio, base_bspline, lambda_opt / 10)
+aj_dif_alto <- suavizar_comparacion(D_pixel_anio, base_bspline, lambda_opt * 10)
+media_sim_bajo <- rowMeans(eval.fd(tiempos, aj_dif_bajo$fd))
+media_sim_opt <- rowMeans(diferencia_comparacion[idx_72_comp, ])
+media_sim_alto <- rowMeans(eval.fd(tiempos, aj_dif_alto$fd))
+
+evaluar_sensibilidad_comp <- function(nombre, log_lam, gl_ef, media_curva) {
+  cambio <- media_curva - media_discreta_comp
+  mismo_signo <- sign(media_curva) == sign(media_discreta_comp)
+  data.frame(
+    esquema = nombre,
+    log10_lambda = log_lam,
+    gl_efectivos = gl_ef,
+    MAE_total_mm = mean(abs(cambio)),
+    MAE_inicio_1_6_mm = mean(abs(cambio[1:6])),
+    MAE_interior_7_66_mm = mean(abs(cambio[7:66])),
+    MAE_final_67_72_mm = mean(abs(cambio[67:72])),
+    concordancia_signo_pct = mean(mismo_signo) * 100,
+    media_P27_mm = media_curva[27],
+    media_P68_mm = media_curva[68],
+    media_P72_mm = media_curva[72]
+  )
+}
+
+sensibilidad_suavizado_comp <- rbind(
+  evaluar_sensibilidad_comp("Discreta pixel-anio", NA_real_, 72, media_discreta_comp),
+  evaluar_sensibilidad_comp("Asimetrico K6 vs K11 (estacion-anio)", NA_real_, NA_real_, media_asimetrica_pares),
+  evaluar_sensibilidad_comp("Asimetrico K6 vs K11 (pixel-anio)", NA_real_, NA_real_, media_asimetrica_pa),
+  evaluar_sensibilidad_comp("Simetrico lambda/10", log_lambda_opt - 1, aj_dif_bajo$df, media_sim_bajo),
+  evaluar_sensibilidad_comp("Simetrico lambda opt", log_lambda_opt, gl_opt, media_sim_opt),
+  evaluar_sensibilidad_comp("Simetrico 10*lambda", log_lambda_opt + 1, aj_dif_alto$df, media_sim_alto)
+)
+rownames(sensibilidad_suavizado_comp) <- NULL
+sensibilidad_suavizado_comp
+guardar_tabla(sensibilidad_suavizado_comp, "06_comparacion_sensibilidad_suavizado_simetrico.csv")
+
+png("Figuras/06_comparacion_sensibilidad_suavizado_simetrico.png", width = 9.5, height = 5, units = "in", res = 150)
+plot(tiempos, media_discreta_comp, type = "l", lwd = 1.5, col = "grey45",
+     ylim = range(media_discreta_comp, media_asimetrica_pa, media_sim_bajo, media_sim_opt, media_sim_alto),
+     xlab = "Péntada", ylab = "Estación - satélite (mm)",
+     main = "Diferencia media: suavizado asimétrico frente a suavizado simétrico")
+lines(tiempos, media_asimetrica_pa, lwd = 2, lty = 2, col = "firebrick")
+lines(tiempos, media_sim_bajo, lwd = 1.8, lty = 3, col = "steelblue")
+lines(tiempos, media_sim_opt, lwd = 2.4, lty = 1, col = "navy")
+lines(tiempos, media_sim_alto, lwd = 1.8, lty = 4, col = "darkcyan")
+abline(h = 0, lty = 3)
+legend("bottomleft",
+       c("Discreta píxel-año", "Asimétrico K=6 vs K=11", "Simétrico lambda/10 (gl=13,35)",
+         "Simétrico lambda opt (gl=7,96)", "Simétrico 10*lambda (gl=4,92)"),
+       col = c("grey45", "firebrick", "steelblue", "navy", "darkcyan"),
+       lty = c(1, 2, 3, 1, 4), lwd = c(1.5, 2, 1.8, 2.4, 1.8), bty = "n", cex = 0.78)
+dev.off()
+# Con suavizado simétrico desaparecen la inversión de signo en la péntada 68 (-4,56 mm discreto ->
+# -1,35 mm simétrico frente a +6,48 mm asimétrico) y el artefacto de borde en la péntada 72
+# (-5,34 mm discreto -> -3,05 mm simétrico frente a -20,64 mm asimétrico), reduciendo el error medio
+# en las péntadas 67-72 de 6,33 mm a 3,02 mm y subiendo la concordancia de signo de 65,3 % a 73,6 %
+
+##### Comparación funcional entre estación y satélite #####
+# Funciones auxiliares para intervalos y pruebas por permutación
 B_comparacion <- 5000
 alfa_comparacion <- 0.05
 p_maximo <- function(maximos_nulos, observado) {
@@ -1965,76 +2174,294 @@ intervalos_pentadas <- function(indicador, malla = pentadas_eda) {
              fin_pentada = malla[fin[r$values]],
              puntos = r$lengths[r$values])
 }
-set.seed(2026)
-signos_red <- matrix(sample(c(-1, 1), n_red * B_comparacion, replace = TRUE), nrow = n_red)
-media_red <- rowMeans(D_red)
-ee_red <- apply(D_red, 1, sd) / sqrt(n_red)
-stopifnot(n_red >= 2, all(is.finite(ee_red) & ee_red > 0))
-t_obs <- media_red / ee_red
-medias_nulas <- D_red %*% signos_red / n_red
-ee_nulos <- sqrt((rowMeans(D_red^2) - medias_nulas^2) / (n_red - 1))
-t_nulos <- abs(medias_nulas / ee_nulos)
-t_max_nulos <- apply(t_nulos, 2, max)
-c_puntual_t <- apply(t_nulos, 1, quantile, probs = 1 - alfa_comparacion)
-c_maximo_t <- unname(quantile(t_max_nulos, 1 - alfa_comparacion))
-p_puntual_t <- (1 + rowSums(t_nulos >= abs(t_obs) - 1e-12)) / (B_comparacion + 1)
-pico_t <- which.max(abs(t_obs))
-t_por_pentada <- data.frame(
-  zona = "Red completa", pentada = pentadas_eda, media_mm = media_red,
-  EE_mm = ee_red, t = t_obs, c_puntual = c_puntual_t, c_maximo = c_maximo_t,
-  p_puntual = p_puntual_t, significativa = abs(t_obs) > c_maximo_t
+stopifnot(identical(colnames(diferencia_comparacion), as.character(metadatos_comparacion$clave_pixel_anio)),
+          !anyDuplicated(metadatos_comparacion[, c("pixel", "YEAR")]))
+diferencia_por_anio <- function(incluir, anios) {
+  sapply(anios, function(anio) {
+    pares <- which(incluir & metadatos_comparacion$YEAR == anio)
+    rowMeans(diferencia_comparacion[, pares, drop = FALSE])
+  })
+}
+anios_red <- sort(unique(metadatos_comparacion$YEAR))
+D_red <- diferencia_por_anio(rep(TRUE, nrow(metadatos_comparacion)), anios_red)
+n_red <- length(anios_red)
+
+# Curvas climatológicas medias por píxel único (P = 147) de cada fuente por separado
+pixeles_unicos <- sort(unique(metadatos_comparacion$pixel))
+indices_por_pixel <- split(seq_len(nrow(metadatos_comparacion)),
+                           factor(metadatos_comparacion$pixel, levels = pixeles_unicos))
+metadatos_pixeles <- do.call(rbind, lapply(seq_along(pixeles_unicos), function(k) {
+  idx <- indices_por_pixel[[k]]
+  sub <- metadatos_comparacion[idx, , drop = FALSE]
+  alt_comp <- if (all(is.na(sub$altitud_completa))) NA_real_ else mean(sub$altitud_completa, na.rm = TRUE)
+  alt_dem <- mean(sub$altitud_DEM, na.rm = TRUE)
+  alt_ref <- ifelse(!is.na(alt_comp), alt_comp, alt_dem)
+  piso <- case_when(
+    alt_ref < 700 ~ "Pacífico bajo (<700 m)",
+    alt_ref < 1240 ~ "Valle (700-1239 m)",
+    alt_ref <= 2000 ~ "Montaña media (1240-2000 m)",
+    TRUE ~ "Alta montaña (>2000 m)"
+  )
+  data.frame(
+    pixel = pixeles_unicos[k],
+    anios_activos = nrow(sub),
+    estaciones_max = max(sub$estaciones_en_pixel),
+    longitud = mean(sub$longitud),
+    latitud = mean(sub$latitud),
+    altitud_m = alt_ref,
+    piso_altitudinal = piso
+  )
+}))
+rownames(metadatos_pixeles) <- NULL
+
+X1_pixeles <- sapply(indices_por_pixel, function(idx) rowMeans(valores_comparacion$terrestre[, idx, drop = FALSE]))
+X2_pixeles <- sapply(indices_por_pixel, function(idx) rowMeans(valores_comparacion$satelital[, idx, drop = FALSE]))
+coefs1_pixeles <- sapply(indices_por_pixel, function(idx) rowMeans(ajuste_comp_est$fd$coefs[, idx, drop = FALSE]))
+coefs2_pixeles <- sapply(indices_por_pixel, function(idx) rowMeans(ajuste_comp_sat$fd$coefs[, idx, drop = FALSE]))
+colnames(X1_pixeles) <- colnames(X2_pixeles) <- as.character(pixeles_unicos)
+colnames(coefs1_pixeles) <- colnames(coefs2_pixeles) <- as.character(pixeles_unicos)
+table(metadatos_pixeles$piso_altitudinal)
+
+# Estadístico t con varianza combinada y estadístico de tipo Welch T(t) para dos muestras (script_t-funcional.R)
+Estadisticos_t <- function(A, B) {
+  nA <- ncol(A)
+  nB <- ncol(B)
+  mA <- rowMeans(A)
+  mB <- rowMeans(B)
+  vA <- rowSums((A - mA)^2) / (nA - 1)
+  vB <- rowSums((B - mB)^2) / (nB - 1)
+  sp2 <- ((nA - 1) * vA + (nB - 1) * vB) / (nA + nB - 2)
+  list(t_comb = (mA - mB) / sqrt(sp2 * (1 / nA + 1 / nB)),
+       T_welch = abs(mA - mB) / sqrt(vA / nA + vB / nB),
+       dif = mA - mB,
+       ee_welch = sqrt(vA / nA + vB / nB))
+}
+
+# Prueba t funcional de dos muestras por permutación de etiquetas con criterio del máximo
+prueba_t_dos_muestras <- function(A, B_mat, nombre_grupo) {
+  n1 <- ncol(A)
+  n2 <- ncol(B_mat)
+  n <- n1 + n2
+  Est_obs <- Estadisticos_t(A, B_mat)
+  X_todas <- cbind(A, B_mat)
+  set.seed(2026)
+  Grupos1 <- replicate(B_comparacion, sort(sample(n, n1)))
+  T_nulos <- matrix(NA_real_, nrow(A), B_comparacion)
+  for (b in seq_len(B_comparacion)) {
+    g1 <- Grupos1[, b]
+    T_nulos[, b] <- Estadisticos_t(X_todas[, g1, drop = FALSE], X_todas[, -g1, drop = FALSE])$T_welch
+  }
+  T_max_nulos <- apply(T_nulos, 2, max)
+  T_obs <- Est_obs$T_welch
+  c_puntual <- apply(T_nulos, 1, quantile, probs = 1 - alfa_comparacion)
+  c_maximo <- unname(quantile(T_max_nulos, 1 - alfa_comparacion))
+  p_puntual <- (1 + rowSums(T_nulos >= T_obs - 1e-12)) / (B_comparacion + 1)
+  pico <- which.max(T_obs)
+  p_global <- p_maximo(T_max_nulos, T_obs[pico])
+
+  por_pentada <- data.frame(
+    grupo = nombre_grupo,
+    pentada = pentadas_eda,
+    media_estaciones_mm = rowMeans(A),
+    media_satelite_mm = rowMeans(B_mat),
+    DE_estaciones_mm = apply(A, 1, sd),
+    DE_satelite_mm = apply(B_mat, 1, sd),
+    diferencia_mm = Est_obs$dif,
+    EE_welch_mm = Est_obs$ee_welch,
+    t_comb = Est_obs$t_comb,
+    T_welch = T_obs,
+    c_puntual = c_puntual,
+    c_maximo = c_maximo,
+    p_puntual = p_puntual,
+    significativa = T_obs > c_maximo
+  )
+
+  iv <- intervalos_pentadas(T_obs > c_maximo)
+  if (nrow(iv) > 0) {
+    iv$grupo <- nombre_grupo
+    for (k in seq_len(nrow(iv))) {
+      idx <- which(pentadas_eda >= iv$inicio_pentada[k] & pentadas_eda <= iv$fin_pentada[k])
+      j <- idx[which.max(T_obs[idx])]
+      iv$dif_min_mm[k] <- min(Est_obs$dif[idx])
+      iv$dif_max_mm[k] <- max(Est_obs$dif[idx])
+      iv$pico_pentada[k] <- pentadas_eda[j]
+      iv$pico_T_welch[k] <- T_obs[j]
+    }
+    iv <- iv[, c("grupo", "inicio_pentada", "fin_pentada", "puntos",
+                 "dif_min_mm", "dif_max_mm", "pico_pentada", "pico_T_welch")]
+  }
+
+  resumen <- data.frame(
+    grupo = nombre_grupo,
+    n_estaciones = n1,
+    n_satelite = n2,
+    media_estaciones_mm = mean(A),
+    media_satelite_mm = mean(B_mat),
+    diferencia_media_mm = mean(Est_obs$dif),
+    DE_media_estaciones_mm = mean(apply(A, 1, sd)),
+    DE_media_satelite_mm = mean(apply(B_mat, 1, sd)),
+    pentada_pico = pentadas_eda[pico],
+    diferencia_pico_mm = Est_obs$dif[pico],
+    EE_welch_pico_mm = Est_obs$ee_welch[pico],
+    T_welch_max = T_obs[pico],
+    c_maximo = c_maximo,
+    p_global = p_global,
+    puntos_sig_maximo = sum(T_obs > c_maximo),
+    puntos_sig_puntual = sum(p_puntual < alfa_comparacion)
+  )
+  list(resumen = resumen, por_pentada = por_pentada, intervalos = iv)
+}
+
+# Evaluación en la red completa, cobertura >= 18 años, dominio andino >= 700 m y pisos altitudinales
+subconjuntos_t <- list(
+  "Red completa (P=147)" = rep(TRUE, nrow(metadatos_pixeles)),
+  "Cobertura >=18 años (P=105)" = metadatos_pixeles$anios_activos >= 18,
+  "Dominio andino >=700 m (P=140)" = metadatos_pixeles$altitud_m >= 700,
+  "Pacífico bajo (<700 m)" = metadatos_pixeles$piso_altitudinal == "Pacífico bajo (<700 m)",
+  "Valle (700-1239 m)" = metadatos_pixeles$piso_altitudinal == "Valle (700-1239 m)",
+  "Montaña media (1240-2000 m)" = metadatos_pixeles$piso_altitudinal == "Montaña media (1240-2000 m)",
+  "Alta montaña (>2000 m)" = metadatos_pixeles$piso_altitudinal == "Alta montaña (>2000 m)"
 )
-t_red <- data.frame(
-  t_por_pentada[pico_t, c("zona", "pentada", "media_mm", "EE_mm", "t")],
-  anios = n_red, c_maximo = c_maximo_t,
-  p_global = p_maximo(t_max_nulos, abs(t_obs[pico_t]))
-)
-t_red
-guardar_tabla(t_red, "06_comparacion_t_pareada_red.csv")
+resultados_t <- lapply(names(subconjuntos_t), function(nom) {
+  sel <- subconjuntos_t[[nom]]
+  prueba_t_dos_muestras(X1_pixeles[, sel, drop = FALSE], X2_pixeles[, sel, drop = FALSE], nom)
+})
+names(resultados_t) <- names(subconjuntos_t)
+
+t_resumen <- do.call(rbind, lapply(resultados_t, `[[`, "resumen"))
+rownames(t_resumen) <- NULL
+t_resumen
+guardar_tabla(t_resumen, "06_comparacion_t_funcional_resumen.csv")
+
+t_por_pentada <- do.call(rbind, lapply(resultados_t, `[[`, "por_pentada"))
+rownames(t_por_pentada) <- NULL
 guardar_tabla(t_por_pentada, "06_comparacion_t_por_pentada.csv")
 
-# Tramos del año donde |t(t)| supera el valor crítico máximo (error global 0,05)
-intervalos_t_red <- intervalos_pentadas(abs(t_obs) > c_maximo_t)
-for (k in seq_len(nrow(intervalos_t_red))) {
-  idx <- which(pentadas_eda >= intervalos_t_red$inicio_pentada[k] &
-                 pentadas_eda <= intervalos_t_red$fin_pentada[k])
-  j <- idx[which.max(abs(t_obs[idx]))]
-  intervalos_t_red$media_min_mm[k] <- min(media_red[idx])
-  intervalos_t_red$media_max_mm[k] <- max(media_red[idx])
-  intervalos_t_red$pico_pentada[k] <- pentadas_eda[j]
-  intervalos_t_red$pico_t[k] <- t_obs[j]
-}
-intervalos_t_red
-guardar_tabla(intervalos_t_red, "06_comparacion_t_intervalos.csv")
+intervalos_t <- do.call(rbind, Filter(function(x) nrow(x) > 0, lapply(resultados_t, `[[`, "intervalos")))
+rownames(intervalos_t) <- NULL
+intervalos_t
+guardar_tabla(intervalos_t, "06_comparacion_t_intervalos.csv")
 
-png("Figuras/06_comparacion_t_pareada.png", width = 10, height = 4.5, units = "in", res = 150)
-par(mfrow = c(1, 2))
-matplot(pentadas_eda, D_red, type = "l", lty = 1, col = "grey60",
-        xlab = "Péntada", ylab = "Estación - satélite (mm)",
-        main = "Diferencias pareadas por año")
-lines(pentadas_eda, media_red, lwd = 2, col = "red")
-lines(pentadas_eda, media_red + 2 * ee_red, lty = 2, col = "red")
-lines(pentadas_eda, media_red - 2 * ee_red, lty = 2, col = "red")
-abline(h = 0, lty = 3)
-plot(pentadas_eda, abs(t_obs), type = "l", lwd = 2, col = "red",
-     xlab = "Péntada", ylab = "|t(t)|",
-     main = "Prueba pareada por cambio de signo",
-     ylim = c(0, max(abs(t_obs), c_maximo_t) * 1.35))
-lines(pentadas_eda, c_puntual_t, col = "blue", lty = 3, lwd = 2)
-abline(h = c_maximo_t, col = "black", lty = 2)
-legend("topleft", c("Estadístico observado", "Valor crítico puntual (0.05)", "Valor crítico máximo"),
+# Comprobación con tperm.fd de la librería fda en la red completa
+set.seed(2026)
+fd_est_pixeles <- fd(coefs1_pixeles, base_bspline)
+fd_sat_pixeles <- fd(coefs2_pixeles, base_bspline)
+tperm_red <- tperm.fd(fd_est_pixeles, fd_sat_pixeles, nperm = 1000, q = alfa_comparacion,
+                      argvals = pentadas_eda, plotres = FALSE)
+verificacion_tperm <- data.frame(
+  diferencia_max_T_welch = max(abs(resultados_t[["Red completa (P=147)"]]$por_pentada$T_welch - tperm_red$Tvals)),
+  c_maximo_manual = resultados_t[["Red completa (P=147)"]]$resumen$c_maximo,
+  c_maximo_tperm = unname(tperm_red$qval),
+  p_global_manual = resultados_t[["Red completa (P=147)"]]$resumen$p_global,
+  p_global_tperm = tperm_red$pval
+)
+verificacion_tperm
+stopifnot(verificacion_tperm$diferencia_max_T_welch < 1e-12)
+# El estadístico T(t) de Welch manual reproduce tperm.fd() con diferencia máxima de 4,33e-15
+
+# Figura 1: Media, DE y prueba t funcional por permutación en la red completa y dominio andino
+p_red <- resultados_t[["Red completa (P=147)"]]$por_pentada
+p_and <- resultados_t[["Dominio andino >=700 m (P=140)"]]$por_pentada
+png("Figuras/06_comparacion_t_funcional_red.png", width = 11, height = 8, units = "in", res = 150)
+par(mfrow = c(2, 2))
+matplot(pentadas_eda, cbind(p_red$media_estaciones_mm, p_red$media_satelite_mm), type = "l", lty = c(1, 2),
+        lwd = 2, col = c("steelblue", "darkorange"), xlab = "Péntada", ylab = "Precipitación (mm)",
+        main = "Media funcional por píxel - Red completa (P=147)")
+legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange"), lty = c(1, 2), lwd = 2, bty = "n", cex = 0.8)
+matplot(pentadas_eda, cbind(p_red$DE_estaciones_mm, p_red$DE_satelite_mm), type = "l", lty = c(1, 2),
+        lwd = 2, col = c("steelblue", "darkorange"), xlab = "Péntada", ylab = "Desviación estándar (mm)",
+        main = "DE funcional por píxel - Red completa (P=147)")
+legend("topleft", c("Estaciones", "Satélite"), col = c("steelblue", "darkorange"), lty = c(1, 2), lwd = 2, bty = "n", cex = 0.8)
+plot(pentadas_eda, p_red$T_welch, type = "l", lwd = 2, col = "red", xlab = "Péntada", ylab = "T(t) de Welch",
+     main = "Prueba t funcional - Red completa (P=147)",
+     ylim = c(0, max(p_red$T_welch, p_red$c_maximo) * 1.35))
+lines(pentadas_eda, p_red$c_puntual, col = "blue", lty = 3, lwd = 2)
+abline(h = p_red$c_maximo[1], col = "black", lty = 2)
+legend("topright", c("T(t) observado", "Crítico puntual (0.05)", "Crítico máximo"),
+       col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
+plot(pentadas_eda, p_and$T_welch, type = "l", lwd = 2, col = "red", xlab = "Péntada", ylab = "T(t) de Welch",
+     main = "Prueba t funcional - Dominio andino >=700 m (P=140)",
+     ylim = c(0, max(p_and$T_welch, p_and$c_maximo) * 1.35))
+lines(pentadas_eda, p_and$c_puntual, col = "blue", lty = 3, lwd = 2)
+abline(h = p_and$c_maximo[1], col = "black", lty = 2)
+legend("topleft", c("T(t) observado", "Crítico puntual (0.05)", "Crítico máximo"),
        col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
 dev.off()
-# Con c_maximo = 3,43, la diferencia global resulta significativa en cinco tramos del año
-# El satélite supera a las estaciones en 21-31,5, 48,5-50, 54,5-60 y 70,5-72 (máximo -21,25 mm en la 72)
-# En 66-68,5 la relación se invierte y las estaciones superan al satélite (hasta +6,01 mm en la 67,5)
 
-##### ANOVA funcional por subregión #####
-# Polígonos de paisaje y relieve del IGAC (1:100.000) y zonificación hidrográfica del IDEAM (2025)
+# Figura 2: Prueba t funcional de dos muestras por permutación en cada piso altitudinal
+nombres_pisos_t <- c("Pacífico bajo (<700 m)", "Valle (700-1239 m)",
+                     "Montaña media (1240-2000 m)", "Alta montaña (>2000 m)")
+png("Figuras/06_comparacion_t_funcional_pisos.png", width = 11, height = 8, units = "in", res = 150)
+par(mfrow = c(2, 2))
+for (nom_p in nombres_pisos_t) {
+  pp <- resultados_t[[nom_p]]$por_pentada
+  plot(pentadas_eda, pp$T_welch, type = "l", lwd = 2, col = "red", xlab = "Péntada", ylab = "T(t) de Welch",
+       main = paste0(nom_p, " (P=", resultados_t[[nom_p]]$resumen$n_estaciones, ")"),
+       ylim = c(0, max(pp$T_welch, pp$c_maximo) * 1.35))
+  lines(pentadas_eda, pp$c_puntual, col = "blue", lty = 3, lwd = 2)
+  abline(h = pp$c_maximo[1], col = "black", lty = 2)
+  legend("topright", c("T(t) observado", "Crítico puntual (0.05)", "Crítico máximo"),
+         col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.72)
+}
+dev.off()
+# En la red completa (P=147), la DE media de estaciones (17,98 mm) casi duplica la del satélite (9,44 mm) por el cambio de soporte
+# En promedio anual las dos fuentes casi se igualan (+0,11 mm) porque la subestimación en Pacífico bajo (+33,91 mm, p = 0,0148)
+# y Alta montaña (+2,24 mm, p = 0,0104) se compensa con la sobreestimación en Valle (-3,85 mm, p = 0,0002 en 107 de 143 puntos)
+# En el dominio andino >=700 m (P=140), T(t) supera c_maximo = 2,54 en cuatro tramos (53 puntos; p_global = 0,0002)
+
+# Diagnóstico de autocorrelación espacial entre píxeles vecinos (Índice de Moran, Script_Spatial_Analytics.R)
+lat0_pixeles <- mean(metadatos_pixeles$latitud)
+x_pixeles_km <- metadatos_pixeles$longitud * 111.32 * cos(lat0_pixeles * pi / 180)
+y_pixeles_km <- metadatos_pixeles$latitud * 110.57
+dist_pixeles_km <- as.matrix(dist(cbind(x_pixeles_km, y_pixeles_km)))
+umbral_moran_km <- unname(quantile(dist(cbind(x_pixeles_km, y_pixeles_km)), 0.05))
+W_moran <- ifelse(dist_pixeles_km > 0 & dist_pixeles_km < umbral_moran_km, 1, 0)
+suma_filas_W <- rowSums(W_moran)
+W_moran[suma_filas_W > 0, ] <- W_moran[suma_filas_W > 0, ] / suma_filas_W[suma_filas_W > 0]
+
+calcular_indice_moran <- function(z, W, nombre_variable) {
+  n <- length(z)
+  z_centrado <- z - mean(z)
+  denom <- sum(z_centrado^2)
+  I_obs <- (n / sum(W)) * sum(W * (z_centrado %o% z_centrado)) / denom
+  set.seed(2026)
+  I_nulos <- replicate(B_comparacion, {
+    zp <- sample(z_centrado)
+    (n / sum(W)) * sum(W * (zp %o% zp)) / denom
+  })
+  data.frame(
+    variable = nombre_variable,
+    pixeles = n,
+    umbral_vecindad_km = umbral_moran_km,
+    I_Moran = I_obs,
+    esperanza_H0 = -1 / (n - 1),
+    p_permutacion = p_maximo(I_nulos, I_obs)
+  )
+}
+
+media_est_pixel <- colMeans(X1_pixeles)
+media_sat_pixel <- colMeans(X2_pixeles)
+dif_media_pixel <- media_est_pixel - media_sat_pixel
+residuo_piso_pixel <- dif_media_pixel - ave(dif_media_pixel, metadatos_pixeles$piso_altitudinal)
+moran_pixeles <- rbind(
+  calcular_indice_moran(media_est_pixel, W_moran, "Media por píxel - Estaciones"),
+  calcular_indice_moran(media_sat_pixel, W_moran, "Media por píxel - Satélite"),
+  calcular_indice_moran(dif_media_pixel, W_moran, "Diferencia media por píxel"),
+  calcular_indice_moran(residuo_piso_pixel, W_moran, "Residuo centrado por piso altitudinal")
+)
+moran_pixeles
+guardar_tabla(moran_pixeles, "06_comparacion_t_moran_espacial.csv")
+# Con umbral del 5 % de distancias más cortas (16,01 km), existe autocorrelación espacial positiva tanto en
+# estaciones (I = 0,4218) y satélite (I = 0,5795) como en los residuos dentro de cada piso altitudinal (I = 0,4454; p = 0,0002),
+# lo que indica que el tamaño muestral espacial efectivo es menor que P = 147
+
+##### ANOVA funcional por pisos altitudinales #####
+# Comparación entre la zonificación cartográfica IGAC/IDEAM (que pierde 66 estaciones y deja Costa con S = 1)
+# y la zonificación por pisos altitudinales (Ospina Galindez, 2016; Hurtado-Montoya y Mesa-Sánchez, 2014) sin pérdida de estaciones
 archivo_cartografia <- "data/Paisajes_IGAC_hidrografia_IDEAM.gpkg"
 paisajes <- vect(archivo_cartografia, layer = "paisajes_IGAC")
 hidrografia <- vect(archivo_cartografia, layer = "hidrografia_IDEAM")
-estaciones_zonas <- unique(metadatos_eda[, c("STATION_ID", "longitud", "latitud")])
+estaciones_zonas <- unique(metadatos_eda[, c("STATION_ID", "pixel", "longitud", "latitud", "altitud_completa", "altitud_DEM")])
 stopifnot(!anyDuplicated(estaciones_zonas$STATION_ID))
 puntos_zonas <- vect(estaciones_zonas, geom = c("longitud", "latitud"), crs = "EPSG:4326")
 paisaje_punto <- terra::extract(paisajes, project(puntos_zonas, crs(paisajes)))
@@ -2047,7 +2474,6 @@ estaciones_zonas$relieve <- paisaje_punto$TIPO_RELIEVE
 estaciones_zonas$area_hidrografica <- cuenca_punto$nom_ah
 estaciones_zonas$zona_hidrografica <- cuenca_punto$nombre_zh
 
-# Asignación de las planicies por vertiente y del paisaje de montaña en ambas cordilleras
 zona_relieve <- function(paisaje, area_hidrografica, zona_hidrografica) {
   case_when(
     grepl("^Montaña", paisaje) ~ "Montaña",
@@ -2056,247 +2482,506 @@ zona_relieve <- function(paisaje, area_hidrografica, zona_hidrografica) {
     TRUE ~ NA_character_
   )
 }
-estaciones_zonas$zona <- with(estaciones_zonas, zona_relieve(paisaje, area_hidrografica, zona_hidrografica))
-estaciones_zonas$zona[!estaciones_zonas$en_departamento] <- NA_character_
-table(estaciones_zonas$paisaje, estaciones_zonas$zona, useNA = "ifany")
+estaciones_zonas$zona_IGAC <- with(estaciones_zonas, zona_relieve(paisaje, area_hidrografica, zona_hidrografica))
+estaciones_zonas$zona_IGAC[!estaciones_zonas$en_departamento] <- NA_character_
+
+# Altitud de referencia (con respaldo en altitud_DEM para las 4 estaciones >= 2000 m excluidas en altitud_completa)
+niveles_pisos_4 <- c("Pacífico bajo (<700 m)", "Valle (700-1239 m)",
+                     "Montaña media (1240-2000 m)", "Alta montaña (>2000 m)")
+niveles_pisos_3 <- niveles_pisos_4[-1]
+estaciones_zonas$altitud_m <- ifelse(!is.na(estaciones_zonas$altitud_completa),
+                                     estaciones_zonas$altitud_completa,
+                                     estaciones_zonas$altitud_DEM)
+estaciones_zonas$piso_altitudinal <- case_when(
+  estaciones_zonas$altitud_m < 700 ~ "Pacífico bajo (<700 m)",
+  estaciones_zonas$altitud_m < 1240 ~ "Valle (700-1239 m)",
+  estaciones_zonas$altitud_m <= 2000 ~ "Montaña media (1240-2000 m)",
+  TRUE ~ "Alta montaña (>2000 m)"
+)
+stopifnot(!anyNA(estaciones_zonas$piso_altitudinal))
+table(estaciones_zonas$zona_IGAC, estaciones_zonas$piso_altitudinal, useNA = "ifany")
 guardar_tabla(estaciones_zonas, "06_comparacion_estaciones_subregion.csv")
 
-# Unidades de relieve y estaciones sobre el contorno departamental
+# Mapa comparativo: zonificación cartográfica IGAC/IDEAM frente a pisos altitudinales (176 estaciones, 147 píxeles)
 montanas <- paisajes[grepl("^Montaña", paisajes$PAISAJE), ]
 planicies <- paisajes[grepl("^Planicie", paisajes$PAISAJE), "PAISAJE"]
 planicies <- terra::intersect(makeValid(planicies), makeValid(hidrografia[, c("nom_ah", "nombre_zh")]))
 planicies$zona <- zona_relieve(planicies$PAISAJE, planicies$nom_ah, planicies$nombre_zh)
-colores_zonas <- c(Costa = "steelblue", Montaña = "sienna", Valle = "darkgreen")
-colores_puntos <- unname(colores_zonas[estaciones_zonas$zona])
-colores_puntos[is.na(colores_puntos)] <- "grey65"
-png("Figuras/06_estaciones_subregion.png", width = 8, height = 7, units = "in", res = 150)
-plot(valle, col = "grey97", border = "grey35", main = "Estaciones y subregiones del Valle del Cauca")
+colores_zonas_igac <- c(Costa = "steelblue", Montaña = "sienna", Valle = "darkgreen")
+colores_puntos_igac <- unname(colores_zonas_igac[estaciones_zonas$zona_IGAC])
+colores_puntos_igac[is.na(colores_puntos_igac)] <- "grey65"
+colores_pisos <- c("Pacífico bajo (<700 m)" = "steelblue",
+                   "Valle (700-1239 m)" = "darkgreen",
+                   "Montaña media (1240-2000 m)" = "darkorange2",
+                   "Alta montaña (>2000 m)" = "firebrick")
+colores_puntos_pisos <- unname(colores_pisos[estaciones_zonas$piso_altitudinal])
+
+png("Figuras/06_estaciones_subregion.png", width = 12, height = 6, units = "in", res = 150)
+par(mfrow = c(1, 2))
+plot(valle, col = "grey97", border = "grey35", main = "Zonificación IGAC/IDEAM (66 sin asignar)")
 plot(montanas, col = "wheat2", border = NA, add = TRUE)
 plot(planicies[planicies$zona == "Costa", ], col = "lightblue", border = NA, add = TRUE)
 plot(planicies[planicies$zona == "Valle", ], col = "darkseagreen2", border = NA, add = TRUE)
 lines(valle, col = "grey35")
-points(project(puntos_zonas, crs(valle)), pch = 20, col = colores_puntos, cex = 0.9)
-legend(xmin(valle) + 0.03, ymax(valle) - 0.02, legend = c(names(colores_zonas), "Sin asignar"), col = c(colores_zonas, "grey65"),
-       pch = 20, bty = "n")
+points(project(puntos_zonas, crs(valle)), pch = 20, col = colores_puntos_igac, cex = 0.9)
+legend("topleft", legend = c(names(colores_zonas_igac), "Sin asignar (66)"),
+       col = c(colores_zonas_igac, "grey65"), pch = 20, bty = "n", cex = 0.78)
+plot(valle, col = "grey97", border = "grey35", main = "Pisos altitudinales (176 estaciones, 147 píxeles)")
+plot(montanas, col = "grey92", border = NA, add = TRUE)
+lines(valle, col = "grey35")
+points(project(puntos_zonas, crs(valle)), pch = 20, col = colores_puntos_pisos, cex = 0.9)
+legend("topleft", legend = niveles_pisos_4, col = unname(colores_pisos[niveles_pisos_4]),
+       pch = 20, bty = "n", cex = 0.75)
 dev.off()
 
-# Pares estación-año por subregión y años comunes para el ANOVA
-zonas <- names(colores_zonas)
-zona_par <- estaciones_zonas$zona[match(metadatos_eda$STATION_ID, estaciones_zonas$STATION_ID)]
-cobertura_zonas <- table(anio = metadatos_eda$YEAR, zona = factor(zona_par, levels = zonas))
-anios_comunes <- rowSums(cobertura_zonas > 0) == length(zonas)
-cobertura_anova <- data.frame(anio = as.integer(rownames(cobertura_zonas)),
-                              as.data.frame.matrix(cobertura_zonas), incluido = anios_comunes)
+# Curvas climatológicas de diferencia por píxel único D_p(t) = X1_p(t) - X2_p(t) y cobertura anual por piso altitudinal
+D_pixeles <- X1_pixeles - X2_pixeles
+colnames(D_pixeles) <- as.character(pixeles_unicos)
+piso_par <- metadatos_pixeles$piso_altitudinal[match(metadatos_comparacion$pixel, metadatos_pixeles$pixel)]
+cobertura_pisos <- table(anio = metadatos_comparacion$YEAR,
+                         piso = factor(piso_par, levels = niveles_pisos_4))
+cobertura_anova <- data.frame(anio = as.integer(rownames(cobertura_pisos)),
+                              as.data.frame.matrix(cobertura_pisos),
+                              todos_activos = rowSums(cobertura_pisos > 0) == length(niveles_pisos_4),
+                              check.names = FALSE)
 cobertura_anova
 guardar_tabla(cobertura_anova, "06_comparacion_cobertura_ANOVA.csv")
-anios_zonas <- cobertura_anova$anio[anios_comunes]
-n_anios_zonas <- length(anios_zonas)
-stopifnot(n_anios_zonas >= 2)
-diferencias_anuales <- list()
-for (zona in zonas) {
-  diferencias_anuales[[zona]] <- diferencia_por_anio(zona_par %in% zona, anios_zonas)
-}
-medias_zonas <- as.data.frame(lapply(diferencias_anuales, rowMeans))
 
-# Revisión de dispersión y homocedasticidad por subregión en los 17 años comunes
-varianzas_zonas <- sapply(zonas, function(z) apply(diferencias_anuales[[z]], 1, var))
-de_zonas <- sqrt(varianzas_zonas)
-media_global_zonas <- rowMeans(as.matrix(medias_zonas))
-pares_comunes_zonas <- metadatos_eda$YEAR %in% anios_zonas
+# Revisión de medias y dispersión espacial entre píxeles dentro de cada piso altitudinal
+medias_pisos <- sapply(niveles_pisos_4, function(p) {
+  rowMeans(D_pixeles[, metadatos_pixeles$piso_altitudinal == p, drop = FALSE])
+})
+de_pisos <- sapply(niveles_pisos_4, function(p) {
+  apply(D_pixeles[, metadatos_pixeles$piso_altitudinal == p, drop = FALSE], 1, sd)
+})
+media_global_pisos <- rowMeans(D_pixeles)
 dispersion_zonas <- data.frame(
-  zona = zonas,
-  estaciones = sapply(zonas, function(z) n_distinct(metadatos_eda$STATION_ID[pares_comunes_zonas & zona_par %in% z])),
-  pares = sapply(zonas, function(z) sum(pares_comunes_zonas & zona_par %in% z)),
-  DE_min_mm = apply(de_zonas, 2, min),
-  DE_max_mm = apply(de_zonas, 2, max),
-  pentada_max = pentadas_eda[apply(de_zonas, 2, which.max)],
-  DE_media_mm = colMeans(de_zonas)
+  piso_altitudinal = niveles_pisos_4,
+  estaciones = sapply(niveles_pisos_4, function(p) sum(estaciones_zonas$piso_altitudinal == p)),
+  pixeles = sapply(niveles_pisos_4, function(p) sum(metadatos_pixeles$piso_altitudinal == p)),
+  pares_pixel_anio = sapply(niveles_pisos_4, function(p) sum(piso_par == p)),
+  sesgo_medio_mm = colMeans(medias_pisos),
+  sesgo_anual_mm = 72 * colMeans(medias_pisos),
+  DE_min_mm = apply(de_pisos, 2, min),
+  DE_max_mm = apply(de_pisos, 2, max),
+  pentada_max_DE = pentadas_eda[apply(de_pisos, 2, which.max)],
+  DE_media_mm = colMeans(de_pisos),
+  row.names = NULL
 )
 dispersion_zonas
 guardar_tabla(dispersion_zonas, "06_comparacion_dispersion_zonas.csv")
 
 png("Figuras/06_comparacion_ANOVA_medias_DE.png", width = 11, height = 4.5, units = "in", res = 150)
 par(mfrow = c(1, 2))
-matplot(pentadas_eda, as.matrix(medias_zonas), type = "l", lty = 1, lwd = 2, col = colores_zonas,
-        ylim = range(medias_zonas, media_global_zonas) + c(0, 15),
-        xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Medias funcionales por subregión")
-lines(pentadas_eda, media_global_zonas, lwd = 2, lty = 2)
-legend("top", c(zonas, "Global"), col = c(colores_zonas, "black"), lty = c(rep(1, length(zonas)), 2),
-       lwd = 2, bty = "n", ncol = 4, cex = 0.75)
-matplot(pentadas_eda, de_zonas, type = "l", lty = 1, lwd = 2, col = colores_zonas,
-        ylim = c(0, max(de_zonas) * 1.25),
-        xlab = "Péntada", ylab = "Desviación estándar (mm)", main = "Desviación estándar funcional por subregión")
-legend("top", zonas, col = colores_zonas, lwd = 2, bty = "n", ncol = 3, cex = 0.75)
+matplot(pentadas_eda, medias_pisos, type = "l", lty = 1, lwd = 2, col = colores_pisos[niveles_pisos_4],
+        ylim = range(medias_pisos, media_global_pisos) + c(-2, 12),
+        xlab = "Péntada", ylab = "Estación - satélite (mm)", main = "Medias funcionales por piso altitudinal")
+lines(pentadas_eda, media_global_pisos, lwd = 2, lty = 2, col = "black")
+legend("topleft", c(niveles_pisos_4, "Global (P=147)"),
+       col = c(unname(colores_pisos[niveles_pisos_4]), "black"),
+       lty = c(rep(1, length(niveles_pisos_4)), 2), lwd = 2, bty = "n", cex = 0.68)
+matplot(pentadas_eda, de_pisos, type = "l", lty = 1, lwd = 2, col = colores_pisos[niveles_pisos_4],
+        ylim = c(0, max(de_pisos) * 1.25),
+        xlab = "Péntada", ylab = "Desviación estándar entre píxeles (mm)",
+        main = "DE funcional por piso altitudinal")
+legend("topleft", niveles_pisos_4, col = unname(colores_pisos[niveles_pisos_4]),
+       lwd = 2, bty = "n", cex = 0.68)
 dev.off()
-# Costa refleja únicamente a Yurumanguí (1 estación) y tiene una DE 7 a 8 veces mayor que Montaña y Valle
-# La heterocedasticidad entre zonas descarta asumir igualdad de varianzas y motiva calibrar por cambio de signo anual
+# La zonificación por pisos altitudinales conserva las 176 estaciones (147 píxeles) y separa un gradiente monótono:
+# Valle (-3,85 mm/péntada; DE media 5,51 mm), Montaña media (-0,46 mm; DE 7,91 mm), Alta montaña (+2,24 mm; DE 11,18 mm)
+# y Pacífico bajo (+33,91 mm; DE 35,15 mm con P = 7 píxeles independientes en vez de S = 1 estación)
 
-# ANOVA funcional de la diferencia entre fuentes con el año como bloque
-# Centrar cada zona en la media de las tres zonas de ese mismo año elimina el efecto común del año
-n_zonas <- length(zonas)
-media_bloque <- Reduce("+", diferencias_anuales[zonas]) / n_zonas
-contrastes_zonas <- lapply(diferencias_anuales[zonas], function(D) D - media_bloque)
-SC_dentro_anios <- Reduce("+", lapply(contrastes_zonas, function(D) rowSums(D^2)))
-SC_zonas <- n_anios_zonas * Reduce("+", lapply(contrastes_zonas, function(D) rowMeans(D)^2))
-gl_zonas <- n_zonas - 1
-gl_error <- gl_zonas * (n_anios_zonas - 1)
-F_zonas <- function(SC) (SC / gl_zonas) / ((SC_dentro_anios - SC) / gl_error)
-stopifnot(all(SC_dentro_anios > SC_zonas))
-F_obs <- F_zonas(SC_zonas)
-
-# Bajo igualdad de las curvas medias, el mismo signo cambia los contrastes de un año en conjunto
-set.seed(2026)
-signos_anuales <- matrix(sample(c(-1, 1), n_anios_zonas * B_comparacion, replace = TRUE), nrow = n_anios_zonas)
-SC_zonas_nulas <- n_anios_zonas * Reduce("+", lapply(contrastes_zonas, function(D) {
-  (D %*% signos_anuales / n_anios_zonas)^2
-}))
-F_nulos <- F_zonas(SC_zonas_nulas)
-F_max_nulos <- apply(F_nulos, 2, max)
-c_puntual_F <- apply(F_nulos, 1, quantile, probs = 1 - alfa_comparacion)
-c_maximo_F <- unname(quantile(F_max_nulos, 1 - alfa_comparacion))
-p_puntual_F <- (1 + rowSums(F_nulos >= F_obs - 1e-12)) / (B_comparacion + 1)
-
+# Función ANOVA funcional siguiendo script_ANOVA-funcional.R (SSR_t, SSE_t, SST_t, F_t, Zhang L2 y F_n,
+# T_GPF de Zhang y Liang, permutación de etiquetas con c_maximo y prueba heterocedástica V_n de Cuevas et al., 2004)
 w_eda <- rep(1, length(pentadas_eda))
 w_eda[c(1, length(pentadas_eda))] <- 0.5
-SSR_n_zonas <- sum(w_eda * SC_zonas)
-SSE_n_zonas <- sum(w_eda * (SC_dentro_anios - SC_zonas))
-F_global_zonas <- (SSR_n_zonas / gl_zonas) / (SSE_n_zonas / gl_error)
-SSR_n_nulos_zonas <- as.numeric(w_eda %*% SC_zonas_nulas)
-F_global_nulos_zonas <- (SSR_n_nulos_zonas / gl_zonas) /
-  ((sum(w_eda * SC_dentro_anios) - SSR_n_nulos_zonas) / gl_error)
 
-pico_F <- which.max(F_obs)
-anova_zonas <- data.frame(
-  anios = n_anios_zonas, gl_zonas, gl_error, pentada = pentadas_eda[pico_F],
-  F_max = unname(F_obs[pico_F]), c_maximo = c_maximo_F,
-  p_global = p_maximo(F_max_nulos, F_obs[pico_F]),
-  F_integrado = F_global_zonas,
-  p_F_integrado = p_maximo(F_global_nulos_zonas, F_global_zonas)
+ejecutar_anova_funcional <- function(X, Grupo, nombre_esquema, w = w_eda, malla = pentadas_eda) {
+  Grupo <- factor(Grupo, levels = unique(levels(Grupo)[levels(Grupo) %in% Grupo]))
+  niveles <- levels(Grupo)
+  k <- length(niveles)
+  n_i <- table(Grupo)
+  n <- sum(n_i)
+  M <- nrow(X)
+
+  Z_grupo <- model.matrix(~ Grupo - 1)
+  Medias <- X %*% Z_grupo %*% diag(1 / as.numeric(n_i))
+  colnames(Medias) <- niveles
+  Media_global <- rowMeans(X)
+  Varianzas <- sapply(niveles, function(g) apply(X[, Grupo == g, drop = FALSE], 1, var))
+  DE_grupos <- sqrt(Varianzas)
+
+  # Sumas de cuadrados puntuales y comprobación de la identidad SST(t) = SSR(t) + SSE(t)
+  SSR_t <- as.numeric((Medias - Media_global)^2 %*% as.numeric(n_i))
+  SSE_t <- rowSums((X - Medias[, as.integer(Grupo)])^2)
+  SST_t <- rowSums((X - Media_global)^2)
+  stopifnot(max(abs(SST_t - (SSR_t + SSE_t))) < 1e-9)
+  F_t <- (SSR_t / (k - 1)) / (SSE_t / (n - k))
+
+  # Pruebas globales L2 y tipo F con corrección por sesgo finito de trazas de Zhang (2013)
+  SSR_n <- sum(w * SSR_t)
+  SSE_n <- sum(w * SSE_t)
+  SST_n <- sum(w * SST_t)
+  N_gl <- n - k
+  Resid <- X - Medias[, as.integer(Grupo)]
+  G_comb <- Resid %*% t(Resid) / N_gl
+  DG <- G_comb * w
+  tr_gamma <- sum(diag(DG))
+  tr_gamma2 <- sum(DG * t(DG))
+  tr_gamma2_c <- N_gl^2 / ((N_gl - 1) * (N_gl + 2)) * (tr_gamma2 - tr_gamma^2 / N_gl)
+  tr2_gamma_c <- N_gl * (N_gl + 1) / ((N_gl - 1) * (N_gl + 2)) * (tr_gamma^2 - 2 * tr_gamma2 / (N_gl + 1))
+  beta_hat <- tr_gamma2_c / tr_gamma
+  d_hat <- tr2_gamma_c / tr_gamma2_c
+  p_L2 <- pchisq(SSR_n / beta_hat, df = (k - 1) * d_hat, lower.tail = FALSE)
+  F_n <- (SSR_n / (k - 1)) / (SSE_n / (n - k))
+  p_F_param <- pf(F_n, (k - 1) * d_hat, (n - k) * d_hat, lower.tail = FALSE)
+
+  # Prueba F puntual globalizada T_GPF (Zhang y Liang, 2014)
+  T_GPF <- sum(w * F_t)
+  s_t <- sqrt(diag(G_comb))
+  Rho <- G_comb / (s_t %o% s_t)
+  DR <- Rho * w
+  tr_rho <- sum(diag(DR))
+  tr_rho2 <- sum(DR * t(DR))
+  beta_rho <- tr_rho2 / ((k - 1) * tr_rho)
+  d_rho <- (k - 1) * tr_rho^2 / tr_rho2
+  p_GPF_param <- pchisq(T_GPF / beta_rho, df = d_rho, lower.tail = FALSE)
+
+  # Calibración por permutación de etiquetas de piso altitudinal para F_n, T_GPF y F_max
+  set.seed(2026)
+  F_t_nulos <- matrix(NA_real_, M, B_comparacion)
+  SSR_n_nulos <- numeric(B_comparacion)
+  n_vec <- as.numeric(n_i)
+  diag_inv <- diag(1 / n_vec)
+  for (b in seq_len(B_comparacion)) {
+    Zb <- Z_grupo[sample(n), ]
+    Med_b <- X %*% Zb %*% diag_inv
+    SSR_b <- as.numeric((Med_b - Media_global)^2 %*% n_vec)
+    F_t_nulos[, b] <- (SSR_b / (k - 1)) / ((SST_t - SSR_b) / (n - k))
+    SSR_n_nulos[b] <- sum(w * SSR_b)
+  }
+  F_n_nulos <- (SSR_n_nulos / (k - 1)) / ((SST_n - SSR_n_nulos) / (n - k))
+  GPF_nulos <- colSums(w * F_t_nulos)
+  Fmax_nulos <- apply(F_t_nulos, 2, max)
+
+  F_max <- max(F_t)
+  pico_F <- which.max(F_t)
+  p_F_perm <- p_maximo(F_n_nulos, F_n)
+  p_GPF_perm <- p_maximo(GPF_nulos, T_GPF)
+  p_Fmax_perm <- p_maximo(Fmax_nulos, F_max)
+  c_puntual <- apply(F_t_nulos, 1, quantile, probs = 1 - alfa_comparacion)
+  c_maximo <- unname(quantile(Fmax_nulos, 1 - alfa_comparacion))
+  p_puntual <- (1 + rowSums(F_t_nulos >= F_t - 1e-12)) / (B_comparacion + 1)
+
+  # Prueba heterocedástica de Cuevas, Febrero y Fraiman (2004): estadístico V_n con covarianzas por grupo
+  pares_idx <- combn(k, 2)
+  V_n <- sum(apply(pares_idx, 2, function(p) {
+    n_i[p[1]] * sum(w * (Medias[, p[1]] - Medias[, p[2]])^2)
+  }))
+  Raiz_cov <- lapply(niveles, function(g) {
+    R_g <- X[, Grupo == g, drop = FALSE] - Medias[, g]
+    E_g <- eigen(R_g %*% t(R_g) / (n_i[g] - 1), symmetric = TRUE)
+    r <- min(n_i[g] - 1, M)
+    E_g$vectors[, 1:r, drop = FALSE] %*% diag(sqrt(pmax(E_g$values[1:r], 0)), r)
+  })
+  set.seed(2026)
+  V_nulos <- numeric(B_comparacion)
+  for (b in seq_len(B_comparacion)) {
+    Zs <- sapply(Raiz_cov, function(A_cov) A_cov %*% rnorm(ncol(A_cov)))
+    V_nulos[b] <- sum(apply(pares_idx, 2, function(p) {
+      sum(w * (Zs[, p[1]] - sqrt(n_i[p[1]] / n_i[p[2]]) * Zs[, p[2]])^2)
+    }))
+  }
+  p_CFF <- p_maximo(V_nulos, V_n)
+
+  tabla_anova <- data.frame(
+    esquema = nombre_esquema,
+    Fuente = c("Entre grupos", "Dentro de grupos", "Total"),
+    gl = c(k - 1, n - k, n - 1),
+    SC_integrada = c(SSR_n, SSE_n, SST_n),
+    CM_integrado = c(SSR_n / (k - 1), SSE_n / (n - k), NA_real_),
+    F_n = c(F_n, NA_real_, NA_real_),
+    gl1_adj = c((k - 1) * d_hat, NA_real_, NA_real_),
+    gl2_adj = c((n - k) * d_hat, NA_real_, NA_real_),
+    Valor_p_param = c(p_F_param, NA_real_, NA_real_),
+    Valor_p_perm = c(p_F_perm, NA_real_, NA_real_)
+  )
+
+  resumen <- data.frame(
+    esquema = nombre_esquema,
+    grupos = k,
+    pixeles = n,
+    gl_entre = k - 1,
+    gl_dentro = N_gl,
+    d_Zhang = d_hat,
+    SSR_n = SSR_n,
+    SSE_n = SSE_n,
+    p_L2 = p_L2,
+    F_n = F_n,
+    p_F_param = p_F_param,
+    p_F_perm = p_F_perm,
+    T_GPF = T_GPF,
+    d_rho = d_rho,
+    p_GPF_param = p_GPF_param,
+    p_GPF_perm = p_GPF_perm,
+    pentada_pico = malla[pico_F],
+    F_max = F_max,
+    c_maximo = c_maximo,
+    p_Fmax_perm = p_Fmax_perm,
+    puntos_sig_Fmax = sum(F_t > c_maximo),
+    V_n_CFF = V_n,
+    p_CFF = p_CFF
+  )
+
+  list(resumen = resumen, tabla_anova = tabla_anova, Medias = Medias, Media_global = Media_global,
+       DE_grupos = DE_grupos, SSR_t = SSR_t, SSE_t = SSE_t, SST_t = SST_t, F_t = F_t,
+       c_puntual = c_puntual, c_maximo = c_maximo, p_puntual = p_puntual,
+       F_n = F_n, F_n_nulos = F_n_nulos, d_hat = d_hat, tr_gamma = tr_gamma,
+       N_gl = N_gl, n_i = n_i)
+}
+
+# Esquema principal E5: Dominio andino bimodal de 3 pisos (>= 700 m, P = 140) siguiendo a Ospina Galindez (2016)
+sel_andino <- metadatos_pixeles$altitud_m >= 700
+anova_E5 <- ejecutar_anova_funcional(
+  D_pixeles[, sel_andino, drop = FALSE],
+  factor(metadatos_pixeles$piso_altitudinal[sel_andino], levels = niveles_pisos_3),
+  "E5: Dominio andino 3 pisos (>=700 m, P=140)"
 )
+
+# Esquema completo E3b: Red completa de 4 pisos altitudinales incluyendo Pacífico bajo (<700 m, P = 147)
+anova_E3b <- ejecutar_anova_funcional(
+  D_pixeles,
+  factor(metadatos_pixeles$piso_altitudinal, levels = niveles_pisos_4),
+  "E3b: Red completa 4 pisos (P=147)"
+)
+
+anova_zonas <- rbind(anova_E5$resumen, anova_E3b$resumen)
 anova_zonas
 guardar_tabla(anova_zonas, "06_comparacion_ANOVA_zonas.csv")
-anova_por_pentada <- data.frame(
-  pentada = pentadas_eda, medias_zonas, SC_zonas, SC_error = SC_dentro_anios - SC_zonas,
-  F = F_obs, c_puntual = c_puntual_F, c_maximo = c_maximo_F,
-  p_puntual = p_puntual_F, significativa = F_obs > c_maximo_F
+
+tabla_anova_zonas <- rbind(anova_E5$tabla_anova, anova_E3b$tabla_anova)
+tabla_anova_zonas
+guardar_tabla(tabla_anova_zonas, "06_comparacion_ANOVA_tabla.csv")
+
+anova_por_pentada <- rbind(
+  data.frame(
+    esquema = "E5: Dominio andino 3 pisos (>=700 m, P=140)",
+    pentada = pentadas_eda,
+    Pacífico_bajo_mm = NA_real_,
+    Valle_mm = anova_E5$Medias[, "Valle (700-1239 m)"],
+    Montaña_media_mm = anova_E5$Medias[, "Montaña media (1240-2000 m)"],
+    Alta_montaña_mm = anova_E5$Medias[, "Alta montaña (>2000 m)"],
+    SC_entre = anova_E5$SSR_t,
+    SC_dentro = anova_E5$SSE_t,
+    F = anova_E5$F_t,
+    c_puntual = anova_E5$c_puntual,
+    c_maximo = anova_E5$c_maximo,
+    p_puntual = anova_E5$p_puntual,
+    significativa = anova_E5$F_t > anova_E5$c_maximo
+  ),
+  data.frame(
+    esquema = "E3b: Red completa 4 pisos (P=147)",
+    pentada = pentadas_eda,
+    Pacífico_bajo_mm = anova_E3b$Medias[, "Pacífico bajo (<700 m)"],
+    Valle_mm = anova_E3b$Medias[, "Valle (700-1239 m)"],
+    Montaña_media_mm = anova_E3b$Medias[, "Montaña media (1240-2000 m)"],
+    Alta_montaña_mm = anova_E3b$Medias[, "Alta montaña (>2000 m)"],
+    SC_entre = anova_E3b$SSR_t,
+    SC_dentro = anova_E3b$SSE_t,
+    F = anova_E3b$F_t,
+    c_puntual = anova_E3b$c_puntual,
+    c_maximo = anova_E3b$c_maximo,
+    p_puntual = anova_E3b$p_puntual,
+    significativa = anova_E3b$F_t > anova_E3b$c_maximo
+  )
 )
-anova_por_pentada[pico_F, ]
 guardar_tabla(anova_por_pentada, "06_comparacion_ANOVA_por_pentada.csv")
 
-# Tramos del año donde F(t) supera el valor crítico máximo (error global 0,05)
-intervalos_anova <- intervalos_pentadas(F_obs > c_maximo_F)
-for (k in seq_len(nrow(intervalos_anova))) {
-  idx <- which(pentadas_eda >= intervalos_anova$inicio_pentada[k] &
-                 pentadas_eda <= intervalos_anova$fin_pentada[k])
-  j <- idx[which.max(F_obs[idx])]
-  intervalos_anova$pico_pentada[k] <- pentadas_eda[j]
-  intervalos_anova$pico_F[k] <- F_obs[j]
-  intervalos_anova$Costa_mm[k] <- medias_zonas$Costa[j]
-  intervalos_anova$Montaña_mm[k] <- medias_zonas$Montaña[j]
-  intervalos_anova$Valle_mm[k] <- medias_zonas$Valle[j]
+# Tramos del año donde F(t) supera el valor crítico máximo simultáneo c_maximo en E5 y E3b
+extraer_intervalos_anova <- function(obj_anova, nombre_esquema) {
+  iv <- intervalos_pentadas(obj_anova$F_t > obj_anova$c_maximo)
+  if (nrow(iv) == 0) return(data.frame())
+  iv$esquema <- nombre_esquema
+  for (k in seq_len(nrow(iv))) {
+    idx <- which(pentadas_eda >= iv$inicio_pentada[k] & pentadas_eda <= iv$fin_pentada[k])
+    j <- idx[which.max(obj_anova$F_t[idx])]
+    iv$pico_pentada[k] <- pentadas_eda[j]
+    iv$pico_F[k] <- obj_anova$F_t[j]
+    iv$Pacífico_bajo_mm[k] <- if ("Pacífico bajo (<700 m)" %in% colnames(obj_anova$Medias)) {
+      obj_anova$Medias[j, "Pacífico bajo (<700 m)"]
+    } else NA_real_
+    iv$Valle_mm[k] <- obj_anova$Medias[j, "Valle (700-1239 m)"]
+    iv$Montaña_media_mm[k] <- obj_anova$Medias[j, "Montaña media (1240-2000 m)"]
+    iv$Alta_montaña_mm[k] <- obj_anova$Medias[j, "Alta montaña (>2000 m)"]
+  }
+  iv[, c("esquema", "inicio_pentada", "fin_pentada", "puntos", "pico_pentada", "pico_F",
+         "Pacífico_bajo_mm", "Valle_mm", "Montaña_media_mm", "Alta_montaña_mm")]
 }
+intervalos_anova <- rbind(
+  extraer_intervalos_anova(anova_E5, "E5: Dominio andino 3 pisos (>=700 m, P=140)"),
+  extraer_intervalos_anova(anova_E3b, "E3b: Red completa 4 pisos (P=147)")
+)
 intervalos_anova
 guardar_tabla(intervalos_anova, "06_comparacion_ANOVA_intervalos.csv")
 
-png("Figuras/06_comparacion_ANOVA_permutacion.png", width = 11, height = 4.5, units = "in", res = 150)
-par(mfrow = c(1, 2))
-plot(pentadas_eda, F_obs, type = "l", lwd = 2, col = "red",
+png("Figuras/06_comparacion_ANOVA_permutacion.png", width = 11, height = 8, units = "in", res = 150)
+par(mfrow = c(2, 2))
+plot(pentadas_eda, anova_E5$F_t, type = "l", lwd = 2, col = "red",
      xlab = "Péntada", ylab = "F(t)",
-     main = "Prueba F puntual por permutación",
-     ylim = c(0, max(F_obs, c_maximo_F) * 1.35))
-lines(pentadas_eda, c_puntual_F, col = "blue", lty = 3, lwd = 2)
-abline(h = c_maximo_F, col = "black", lty = 2)
-legend("topleft", c("Estadístico observado", "Valor crítico puntual (0.05)", "Valor crítico máximo"),
+     main = "F(t) puntual - E5 Dominio andino 3 pisos (P=140)",
+     ylim = c(0, max(anova_E5$F_t, anova_E5$c_maximo) * 1.35))
+lines(pentadas_eda, anova_E5$c_puntual, col = "blue", lty = 3, lwd = 2)
+abline(h = anova_E5$c_maximo, col = "black", lty = 2)
+legend("topleft", c("F(t) observado", "Crítico puntual (0.05)", "Crítico máximo"),
        col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
-hist(F_global_nulos_zonas, breaks = 50, freq = FALSE, col = "grey85", border = "white",
-     xlim = c(0, max(F_global_nulos_zonas, F_global_zonas) * 1.35),
-     xlab = expression(F[n]), main = "Distribución por permutación de F")
-abline(v = F_global_zonas, col = "red", lwd = 2)
+hist(anova_E5$F_n_nulos, breaks = 50, freq = FALSE, col = "grey85", border = "white",
+     xlim = c(0, max(anova_E5$F_n_nulos, anova_E5$F_n) * 1.25),
+     xlab = expression(F[n]), main = "Permutación de F integrado - E5 (3 pisos)")
+abline(v = anova_E5$F_n, col = "red", lwd = 2)
+legend("topright", c("F observado"), col = "red", lwd = 2, bty = "n", cex = 0.8)
+plot(pentadas_eda, anova_E3b$F_t, type = "l", lwd = 2, col = "red",
+     xlab = "Péntada", ylab = "F(t)",
+     main = "F(t) puntual - E3b Red completa 4 pisos (P=147)",
+     ylim = c(0, max(anova_E3b$F_t, anova_E3b$c_maximo) * 1.35))
+lines(pentadas_eda, anova_E3b$c_puntual, col = "blue", lty = 3, lwd = 2)
+abline(h = anova_E3b$c_maximo, col = "black", lty = 2)
+legend("topleft", c("F(t) observado", "Crítico puntual (0.05)", "Crítico máximo"),
+       col = c("red", "blue", "black"), lty = c(1, 3, 2), lwd = c(2, 2, 1), bty = "n", cex = 0.75)
+hist(anova_E3b$F_n_nulos, breaks = 50, freq = FALSE, col = "grey85", border = "white",
+     xlim = c(0, max(anova_E3b$F_n_nulos, anova_E3b$F_n) * 1.15),
+     xlab = expression(F[n]), main = "Permutación de F integrado - E3b (4 pisos)")
+abline(v = anova_E3b$F_n, col = "red", lwd = 2)
 legend("topright", c("F observado"), col = "red", lwd = 2, bty = "n", cex = 0.8)
 dev.off()
-# Con c_maximo = 9,01, F(t) supera el umbral en tres tramos que cubren 114 de los 143 puntos del año
-# En la péntada 19 alcanza F = 41,34 y Yurumanguí registra +53,47 mm frente al satélite
+# En el dominio andino bimodal E5 (P=140, gl = 2 y 137), todas las pruebas rechazan H0:
+# F_n = 5,95 (p_param = 0,00095; p_perm = 0,0022), T_GPF = 969,69 (p_perm = 0,0004), F_max = 14,02 en la péntada 39,5
+# (c_maximo = 4,67; p_Fmax = 0,0002 en 97 de 143 puntos) y la prueba heterocedástica de Cuevas et al. da V_n = 562.485,6 (p_CFF = 0,0040)
+# Al incluir Pacífico bajo en E3b (P=147, gl = 3 y 143), F_n sube a 33,48 (p_perm = 0,0002), F_max = 60,11 (143/143 puntos) y p_CFF = 0,0006
 
-# Comparaciones por pares pareadas por año tras rechazar H0, con ajuste de Holm
-pares_zonas <- combn(zonas, 2, simplify = FALSE)
-n_pares_zonas <- length(pares_zonas)
-anova_pares <- data.frame()
-intervalos_pares <- data.frame()
-curvas_pares <- vector("list", n_pares_zonas)
+# Comparaciones por pares entre pisos altitudinales independientes (T(t) de Welch por permutación y F de dos muestras con ajuste de Holm)
+comparar_pares_pisos <- function(X, Grupo, obj_anova, nombre_esquema) {
+  Grupo <- factor(Grupo, levels = colnames(obj_anova$Medias))
+  niveles <- levels(Grupo)
+  pares_lista <- combn(niveles, 2, simplify = FALSE)
+  n_pares <- length(pares_lista)
+  res_pares <- data.frame()
+  iv_pares <- data.frame()
 
-for (i in seq_len(n_pares_zonas)) {
-  par_z <- pares_zonas[[i]]
-  D_par <- diferencias_anuales[[par_z[1]]] - diferencias_anuales[[par_z[2]]]
-  media_par <- rowMeans(D_par)
-  ee_par <- apply(D_par, 1, sd) / sqrt(n_anios_zonas)
-  t_par <- media_par / ee_par
-  m_nulas_par <- D_par %*% signos_anuales / n_anios_zonas
-  ee_nulas_par <- sqrt((rowMeans(D_par^2) - m_nulas_par^2) / (n_anios_zonas - 1))
-  t_nulos_par <- abs(m_nulas_par / ee_nulas_par)
-  t_max_nulos_par <- apply(t_nulos_par, 2, max)
-  pico_par <- which.max(abs(t_par))
-  c_05_par <- unname(quantile(t_max_nulos_par, 1 - alfa_comparacion))
-  c_adj_par <- unname(quantile(t_max_nulos_par, 1 - alfa_comparacion / n_pares_zonas))
+  for (i in seq_len(n_pares)) {
+    par_g <- pares_lista[[i]]
+    A <- X[, Grupo == par_g[1], drop = FALSE]
+    B_mat <- X[, Grupo == par_g[2], drop = FALSE]
+    nA <- ncol(A)
+    nB <- ncol(B_mat)
+    n_ab <- nA + nB
+    est_ab <- Estadisticos_t(A, B_mat)
 
-  anova_pares <- rbind(anova_pares, data.frame(
-    zona_A = par_z[1], zona_B = par_z[2],
-    contraste = paste(par_z[1], "-", par_z[2]),
-    pico_pentada = pentadas_eda[pico_par],
-    diferencia_mm = media_par[pico_par],
-    EE_mm = ee_par[pico_par],
-    t_max = unname(abs(t_par[pico_par])),
-    c_max_05 = c_05_par,
-    c_max_adj = c_adj_par,
-    p_global = p_maximo(t_max_nulos_par, abs(t_par[pico_par]))
-  ))
-  curvas_pares[[i]] <- list(contraste = paste(par_z[1], "-", par_z[2]),
-                            media = media_par, t = t_par, c_adj = c_adj_par)
+    # Estadístico F de dos muestras con covarianza combinada global (script_ANOVA-funcional.R L473-477)
+    F_par_glob <- (nA * nB / (nA + nB)) * sum(w_eda * est_ab$dif^2) / obj_anova$tr_gamma
+    p_F_glob <- pf(F_par_glob, obj_anova$d_hat, obj_anova$N_gl * obj_anova$d_hat, lower.tail = FALSE)
+
+    # Estadístico T(t) de Welch de dos muestras independientes por permutación de etiquetas entre los dos pisos
+    X_ab <- cbind(A, B_mat)
+    set.seed(2026)
+    Grupos_A <- replicate(B_comparacion, sort(sample(n_ab, nA)))
+    T_nulos_ab <- matrix(NA_real_, nrow(X), B_comparacion)
+    for (b in seq_len(B_comparacion)) {
+      g1 <- Grupos_A[, b]
+      T_nulos_ab[, b] <- Estadisticos_t(X_ab[, g1, drop = FALSE], X_ab[, -g1, drop = FALSE])$T_welch
+    }
+    T_max_nulos_ab <- apply(T_nulos_ab, 2, max)
+    pico <- which.max(est_ab$T_welch)
+    c_max_05 <- unname(quantile(T_max_nulos_ab, 1 - alfa_comparacion))
+    c_max_adj <- unname(quantile(T_max_nulos_ab, 1 - alfa_comparacion / n_pares))
+    p_T_welch <- p_maximo(T_max_nulos_ab, est_ab$T_welch[pico])
+
+    res_pares <- rbind(res_pares, data.frame(
+      esquema = nombre_esquema,
+      piso_A = par_g[1],
+      piso_B = par_g[2],
+      contraste = paste(par_g[1], "-", par_g[2]),
+      n_A = nA,
+      n_B = nB,
+      dif_media_mm = mean(est_ab$dif),
+      pico_pentada = pentadas_eda[pico],
+      dif_pico_mm = est_ab$dif[pico],
+      EE_welch_pico_mm = est_ab$ee_welch[pico],
+      T_welch_max = est_ab$T_welch[pico],
+      c_max_05 = c_max_05,
+      c_max_adj = c_max_adj,
+      p_T_welch = p_T_welch,
+      F_dos_muestras = F_par_glob,
+      p_F = p_F_glob
+    ))
+
+    iv <- intervalos_pentadas(est_ab$T_welch > c_max_adj)
+    if (nrow(iv) > 0) {
+      iv$esquema <- nombre_esquema
+      iv$contraste <- paste(par_g[1], "-", par_g[2])
+      for (k in seq_len(nrow(iv))) {
+        idx <- which(pentadas_eda >= iv$inicio_pentada[k] & pentadas_eda <= iv$fin_pentada[k])
+        j <- idx[which.max(est_ab$T_welch[idx])]
+        iv$dif_min_mm[k] <- min(est_ab$dif[idx])
+        iv$dif_max_mm[k] <- max(est_ab$dif[idx])
+        iv$pico_pentada[k] <- pentadas_eda[j]
+        iv$pico_T_welch[k] <- est_ab$T_welch[j]
+      }
+      iv_pares <- rbind(iv_pares, iv[, c("esquema", "contraste", "inicio_pentada", "fin_pentada",
+                                         "puntos", "dif_min_mm", "dif_max_mm",
+                                         "pico_pentada", "pico_T_welch")])
+    }
+  }
+  res_pares$p_Holm_T_welch <- p.adjust(res_pares$p_T_welch, method = "holm")
+  res_pares$p_Holm_F <- p.adjust(res_pares$p_F, method = "holm")
+  list(resumen = res_pares, intervalos = iv_pares)
 }
-anova_pares$p_Holm <- p.adjust(anova_pares$p_global, method = "holm")
-anova_pares <- anova_pares[order(anova_pares$p_global), ]
+
+pares_E5 <- comparar_pares_pisos(
+  D_pixeles[, sel_andino, drop = FALSE],
+  factor(metadatos_pixeles$piso_altitudinal[sel_andino], levels = niveles_pisos_3),
+  anova_E5, "E5: Dominio andino 3 pisos (>=700 m, P=140)"
+)
+pares_E3b <- comparar_pares_pisos(
+  D_pixeles,
+  factor(metadatos_pixeles$piso_altitudinal, levels = niveles_pisos_4),
+  anova_E3b, "E3b: Red completa 4 pisos (P=147)"
+)
+
+anova_pares <- rbind(pares_E5$resumen, pares_E3b$resumen)
 anova_pares
 guardar_tabla(anova_pares, "06_comparacion_ANOVA_pares.csv")
 
-for (i in seq_len(n_pares_zonas)) {
-  cp <- curvas_pares[[i]]
-  iv <- intervalos_pentadas(abs(cp$t) > cp$c_adj)
-  if (nrow(iv) == 0) next
-  iv$contraste <- cp$contraste
-  for (k in seq_len(nrow(iv))) {
-    idx <- which(pentadas_eda >= iv$inicio_pentada[k] & pentadas_eda <= iv$fin_pentada[k])
-    j <- idx[which.max(abs(cp$t[idx]))]
-    iv$dif_min_mm[k] <- min(cp$media[idx])
-    iv$dif_max_mm[k] <- max(cp$media[idx])
-    iv$pico_pentada[k] <- pentadas_eda[j]
-    iv$pico_t[k] <- cp$t[j]
-  }
-  intervalos_pares <- rbind(intervalos_pares, iv[, c("contraste", "inicio_pentada", "fin_pentada",
-                                                     "puntos", "dif_min_mm", "dif_max_mm",
-                                                     "pico_pentada", "pico_t")])
-}
+intervalos_pares <- rbind(pares_E5$intervalos, pares_E3b$intervalos)
 intervalos_pares
 guardar_tabla(intervalos_pares, "06_comparacion_ANOVA_pares_intervalos.csv")
 
-matriz_p_zonas <- matrix(NA, n_zonas, n_zonas, dimnames = list(zonas, zonas))
-for (r in seq_len(nrow(anova_pares))) {
-  matriz_p_zonas[anova_pares$zona_A[r], anova_pares$zona_B[r]] <- anova_pares$p_Holm[r]
-  matriz_p_zonas[anova_pares$zona_B[r], anova_pares$zona_A[r]] <- anova_pares$p_Holm[r]
+# Mapa de calor de valores p ajustados por Holm (T(t) de Welch por permutación) en los 4 pisos altitudinales
+matriz_p_pisos <- matrix(NA_real_, length(niveles_pisos_4), length(niveles_pisos_4),
+                         dimnames = list(niveles_pisos_4, niveles_pisos_4))
+for (r in seq_len(nrow(pares_E3b$resumen))) {
+  pA <- pares_E3b$resumen$piso_A[r]
+  pB <- pares_E3b$resumen$piso_B[r]
+  matriz_p_pisos[pA, pB] <- pares_E3b$resumen$p_Holm_T_welch[r]
+  matriz_p_pisos[pB, pA] <- pares_E3b$resumen$p_Holm_T_welch[r]
 }
-datos_p_zonas <- as.data.frame(as.table(matriz_p_zonas)) %>%
+datos_p_pisos <- as.data.frame(as.table(matriz_p_pisos)) %>%
   filter(!is.na(Freq)) %>%
   mutate(Decision = ifelse(Freq < alfa_comparacion, "p < 0.05", "p >= 0.05"))
-png("Figuras/06_comparacion_ANOVA_pares_Holm.png", width = 6.5, height = 5.5, units = "in", res = 150)
+png("Figuras/06_comparacion_ANOVA_pares_Holm.png", width = 7.5, height = 6, units = "in", res = 150)
 print(
-  ggplot(datos_p_zonas, aes(Var1, Var2, fill = Decision)) +
+  ggplot(datos_p_pisos, aes(Var1, Var2, fill = Decision)) +
     geom_tile(colour = "white") +
     geom_text(aes(label = sprintf("%.4f", Freq)), size = 3.5) +
     scale_fill_manual(values = c("p < 0.05" = "cyan", "p >= 0.05" = "grey85"), name = "Holm") +
-    labs(x = "", y = "", title = "Valores p ajustados por Holm (prueba t pareada por año)") +
-    theme_minimal()
+    labs(x = "", y = "", title = "Valores p ajustados por Holm (T(t) de Welch entre pisos)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 20, hjust = 1))
 )
 dev.off()
-# Los tres pares muestran diferencias significativas tras el ajuste de Holm (p = 0,0006)
-# Aunque Costa concentra la mayor brecha en mm, Montaña frente a Valle alcanza el mayor |t| (10,70) por su baja varianza interanual
+# Con T(t) de Welch de dos muestras independientes y ajuste de Holm, todos los pares de pisos difieren al 5 %:
+# En E5, Valle frente a Montaña media (p_Holm = 0,0054; pico en péntada 10,5 con -4,56 mm), Valle frente a Alta montaña
+# (p_Holm = 0,0056; pico en péntada 3,5 con -7,69 mm) y Montaña media frente a Alta montaña (p_Holm = 0,0292; pico en péntada 42 con -6,44 mm)
+# En E3b, los tres contrastes con Pacífico bajo alcanzan p_Holm <= 0,0152 (T_welch entre 4,25 y 4,89 en las péntadas 56,5 a 58)
 
 
 ##### ANOVA funcional por fase ENSO #####
@@ -2365,8 +3050,8 @@ matplot(tiempos, de_enso, type = "l", lty = 1, lwd = 2, col = colores_enso,
         xlab = "Péntada", ylab = "Desviación estándar (mm)", main = "Desviación estándar funcional por fase ENSO")
 legend("top", fases_enso, col = colores_enso, lwd = 2, bty = "n", ncol = 3, cex = 0.75)
 dev.off()
-# El sesgo medio pasa de -5,09 mm en El Niño a -1,60 mm en Neutral y +1,87 mm en La Niña
-# Las DE medias son comparables (3,85 a 5,51 mm), pero varían a lo largo del año con grupos pequeños (4 a 7 años)
+# El sesgo medio pasa de -3,64 mm en El Niño a -0,29 mm en Neutral y +2,88 mm en La Niña
+# Con suavizado simétrico las DE medias quedan entre 3,81 y 4,99 mm y desaparece el pico de borde en La Niña (DE máxima 8,78 mm)
 
 # ANOVA funcional por fase ENSO con permutación de años completos
 anova_fase_enso <- function(Y, Fmat) {
@@ -2466,8 +3151,8 @@ hist(F_n_nulos_enso, breaks = 50, freq = FALSE, col = "grey85", border = "white"
 abline(v = F_n_enso, col = "red", lwd = 2)
 legend("topright", c("F observado"), col = "red", lwd = 2, bty = "n", cex = 0.8)
 dev.off()
-# Las tres pruebas globales rechazan H0: F_n = 2,99 (p = 0,0002), GPF = 239,48 (p = 0,0008) y F_max = 10,16 (p = 0,0190)
-# F_n y GPF muestran señal más fuerte que F_max porque el corrimiento entre fases se sostiene durante casi todo el año
+# Las pruebas globales integradas rechazan H0: F_n = 3,36 (p = 0,0010) y GPF = 253,55 (p = 0,0018), mientras F_max = 7,67 en la péntada 38 da p = 0,0584 (c_maximo = 7,93)
+# F_n y GPF muestran señal más fuerte que F_max porque el corrimiento entre fases se sostiene durante casi todo el año sin el pico artificial de borde en la péntada 68
 
 # Comparaciones por pares entre fases ENSO tras rechazar H0, con ajuste de Holm
 pares_enso <- combn(fases_enso, 2, simplify = FALSE)
@@ -2487,9 +3172,10 @@ par_fase_enso <- function(Y, Fmat, f1, f2, SSE_glob) {
   v2 <- rowSums(((Y - m2) * ind2)^2) / (n2 - 1)
   sp2 <- ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)
   t_comb <- (m1 - m2) / sqrt(sp2 * (1 / n1 + 1 / n2))
+  T_welch <- abs(m1 - m2) / sqrt(v1 / n1 + v2 / n2)
   SSR_par <- (n1 * n2 / (n1 + n2)) * (m1 - m2)^2
   F_par <- sum(w_72 * SSR_par) / (sum(w_72 * SSE_glob) / gl_error_enso)
-  list(dif = m1 - m2, t_comb = t_comb, F_par = F_par)
+  list(dif = m1 - m2, t_comb = t_comb, T_welch = T_welch, F_par = F_par)
 }
 
 SSE_nulos_enso <- matrix(NA_real_, length(tiempos), B_comparacion)
@@ -2502,13 +3188,17 @@ for (i in seq_len(n_pares_enso)) {
   obs_par <- par_fase_enso(D_red_enso, fase_pentada_enso, pf[1], pf[2], obs_enso$SSE)
   F_par_nulos <- numeric(B_comparacion)
   t_max_par_nulos <- numeric(B_comparacion)
+  T_welch_max_nulos <- numeric(B_comparacion)
   for (b in seq_len(B_comparacion)) {
     p_b <- par_fase_enso(D_red_enso[, perms_enso[, b]], fase_pentada_enso, pf[1], pf[2], SSE_nulos_enso[, b])
     F_par_nulos[b] <- p_b$F_par
     t_max_par_nulos[b] <- max(abs(p_b$t_comb))
+    T_welch_max_nulos[b] <- max(p_b$T_welch)
   }
   pico_par <- which.max(abs(obs_par$t_comb))
+  pico_welch <- which.max(obs_par$T_welch)
   c_adj_par <- unname(quantile(t_max_par_nulos, 1 - alfa_comparacion / n_pares_enso))
+  c_adj_welch <- unname(quantile(T_welch_max_nulos, 1 - alfa_comparacion / n_pares_enso))
   anova_pares_enso <- rbind(anova_pares_enso, data.frame(
     fase_A = pf[1], fase_B = pf[2],
     contraste = paste(pf[1], "-", pf[2]),
@@ -2518,6 +3208,9 @@ for (i in seq_len(n_pares_enso)) {
     t_max = abs(obs_par$t_comb[pico_par]),
     c_max_adj = c_adj_par,
     p_t_max = p_maximo(t_max_par_nulos, abs(obs_par$t_comb[pico_par])),
+    T_welch_max = obs_par$T_welch[pico_welch],
+    c_max_adj_welch = c_adj_welch,
+    p_T_welch = p_maximo(T_welch_max_nulos, obs_par$T_welch[pico_welch]),
     F_integrado = obs_par$F_par,
     p_F_integrado = p_maximo(F_par_nulos, obs_par$F_par)
   ))
@@ -2526,6 +3219,7 @@ for (i in seq_len(n_pares_enso)) {
 }
 anova_pares_enso$p_Holm_F <- p.adjust(anova_pares_enso$p_F_integrado, method = "holm")
 anova_pares_enso$p_Holm_t <- p.adjust(anova_pares_enso$p_t_max, method = "holm")
+anova_pares_enso$p_Holm_T_welch <- p.adjust(anova_pares_enso$p_T_welch, method = "holm")
 anova_pares_enso <- anova_pares_enso[order(anova_pares_enso$p_F_integrado), ]
 anova_pares_enso
 guardar_tabla(anova_pares_enso, "06_comparacion_ENSO_pares.csv")
@@ -2568,15 +3262,15 @@ print(
     theme_minimal()
 )
 dev.off()
-# Tras ajustar por Holm en F integrado, difieren El Niño - La Niña (p = 0,0006) y El Niño - Neutral (p = 0,0392)
-# Neutral - La Niña no alcanza significancia al 5 % (p = 0,1100)
+# Tras ajustar por Holm en F integrado, difieren El Niño - La Niña (p = 0,0006; p_T_welch sin ajuste = 0,0216) y El Niño - Neutral (p = 0,0352)
+# Neutral - La Niña no alcanza significancia al 5 % (p = 0,0914)
 
 # Comprobación por fuente separada: respuesta de estaciones y satélite a las fases ENSO
 E_red_enso <- sapply(anios_red, function(anio) {
-  rowMeans(valores_eda$terrestre[idx_72, metadatos_eda$YEAR == anio, drop = FALSE])
+  rowMeans(valores_comparacion$terrestre[idx_72, metadatos_comparacion$YEAR == anio, drop = FALSE])
 })
 S_red_enso <- sapply(anios_red, function(anio) {
-  rowMeans(valores_eda$satelital[idx_72, metadatos_eda$YEAR == anio, drop = FALSE])
+  rowMeans(valores_comparacion$satelital[idx_72, metadatos_comparacion$YEAR == anio, drop = FALSE])
 })
 fuentes_enso_lista <- list(Estaciones = E_red_enso, Satélite = S_red_enso)
 medias_fuentes_enso <- list()
@@ -2622,8 +3316,57 @@ for (nom_f in names(fuentes_enso_lista)) {
          lty = c(rep(1, length(fases_enso)), 2), lwd = 2, bty = "n", ncol = 4, cex = 0.75)
 }
 dev.off()
-# En estaciones la lluvia media varía con ENSO (20,09 mm en El Niño; 23,65 en Neutral; 26,35 en La Niña; p = 0,0002)
-# En satélite las tres curvas casi coinciden alrededor de 25 mm (p = 0,3975), por lo que sobrestima en El Niño y subestima en La Niña
+# En estaciones la lluvia media varía con ENSO (21,62 mm en El Niño; 25,22 en Neutral; 27,57 en La Niña; F_n = 3,39, p = 0,0006)
+# En satélite las tres curvas permanecen alrededor de 25 mm (25,26; 25,51; 24,69 mm; F_n = 1,12, p = 0,3429), por lo que sobrestima en El Niño y subestima en La Niña
+
+# Sensibilidad por cohorte de píxeles (dominio andino >= 700 m y cohorte fija de 23 años) y diagnóstico de autocorrelación serial lag-1
+pixeles_23_anios <- metadatos_pixeles$pixel[metadatos_pixeles$anios_activos == 23]
+pixeles_andinos_enso <- metadatos_pixeles$pixel[metadatos_pixeles$altitud_m >= 700]
+cohortes_enso_lista <- list(
+  "Red completa (147 píxeles)" = diferencia_por_anio(rep(TRUE, nrow(metadatos_comparacion)), anios_red)[idx_72, , drop = FALSE],
+  "Dominio andino >=700 m (140 píxeles)" = diferencia_por_anio(metadatos_comparacion$pixel %in% pixeles_andinos_enso, anios_red)[idx_72, , drop = FALSE],
+  "Cohorte fija 23 años (59 píxeles)" = diferencia_por_anio(metadatos_comparacion$pixel %in% pixeles_23_anios, anios_red)[idx_72, , drop = FALSE]
+)
+sensibilidad_enso_cohortes <- do.call(rbind, lapply(names(cohortes_enso_lista), function(nom_c) {
+  Y_c <- cohortes_enso_lista[[nom_c]]
+  obs_c <- anova_fase_enso(Y_c, fase_pentada_enso)
+  F_n_c <- (sum(w_72 * obs_c$SSR) / gl_enso) / (sum(w_72 * obs_c$SSE) / gl_error_enso)
+  GPF_c <- sum(w_72 * obs_c$F_t)
+  F_max_c <- max(obs_c$F_t)
+  F_n_nul_c <- numeric(B_comparacion)
+  GPF_nul_c <- numeric(B_comparacion)
+  F_max_nul_c <- numeric(B_comparacion)
+  for (b in seq_len(B_comparacion)) {
+    rb <- anova_fase_enso(Y_c[, perms_enso[, b]], fase_pentada_enso)
+    F_n_nul_c[b] <- (sum(w_72 * rb$SSR) / gl_enso) / (sum(w_72 * rb$SSE) / gl_error_enso)
+    GPF_nul_c[b] <- sum(w_72 * rb$F_t)
+    F_max_nul_c[b] <- max(rb$F_t)
+  }
+  meds_c <- sapply(fases_enso, function(f) {
+    rowSums(Y_c * (fase_pentada_enso == f)) / rowSums(fase_pentada_enso == f)
+  })
+  serie_anual_c <- colMeans(Y_c)
+  acf1_anual <- acf(serie_anual_c, lag.max = 1, plot = FALSE)$acf[2]
+  acf1_pentadas <- apply(Y_c, 1, function(fila) acf(fila, lag.max = 1, plot = FALSE)$acf[2])
+  data.frame(
+    cohorte = nom_c,
+    media_El_Nino_mm = mean(meds_c[, "El Niño"]),
+    media_Neutral_mm = mean(meds_c[, "Neutral"]),
+    media_La_Nina_mm = mean(meds_c[, "La Niña"]),
+    F_max = F_max_c,
+    p_F_max = p_maximo(F_max_nul_c, F_max_c),
+    F_integrado = F_n_c,
+    p_F_integrado = p_maximo(F_n_nul_c, F_n_c),
+    GPF = GPF_c,
+    p_GPF = p_maximo(GPF_nul_c, GPF_c),
+    acf_lag1_media_anual = acf1_anual,
+    acf_lag1_mediana_pentadas = median(acf1_pentadas)
+  )
+}))
+sensibilidad_enso_cohortes
+guardar_tabla(sensibilidad_enso_cohortes, "06_comparacion_ENSO_cohortes_autocorrelacion.csv")
+# El corrimiento del sesgo entre El Niño y La Niña se conserva al excluir el Pacífico (<700 m) y en la cohorte balanceada de 59 píxeles
+# con los 23 años completos (F_n entre 2,98 y 3,36; p <= 0,0030), y la autocorrelación interanual lag-1 de la media anual es baja (0,061 a 0,116)
 
 
 #################### Regresion funcional ####################
