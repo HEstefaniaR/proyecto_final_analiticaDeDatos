@@ -74,6 +74,7 @@ proyecto_final_analiticaDeDatos/
 ├── 02_Ablacion_arquitectura.ipynb      
 ├── 03_Ablacion_cabezas.ipynb           
 ├── 04_Evaluacion_interpretacion.ipynb   
+├── 05_Diagnostico_atenuacion_KAN.ipynb # Atenuación de la KAN y variantes con L1, entropía, poda y armónicos
 ├── data/                               # Datos crudos (estaciones, catálogos, CHIRPS, ONI, cartografía)
 ├── Curvas/                             # Curvas exportadas (coeficientes, bases, metadatos)
 ├── Resultados_Modelos1/                # Pesos de las tres cabezas × 3 semillas
@@ -98,6 +99,7 @@ Los nombres de las tablas y figuras empiezan por el número de la fase:
 | `06` | Comparación y regresión, y las comprobaciones de la KAN |
 | `08` | Red |
 | `09` | Ablación de cabezas |
+| `10` | Diagnóstico de atenuación de la KAN |
 
 
 ---
@@ -132,14 +134,14 @@ Todo está en `data/`:
 ## Parte 3 - Script de R
 1. **Carga de datos** y días faltantes por año y estación.
 2. **Partición por estaciones.**
-   - **Sorteo:** dentro de cada tercil de altitud, 15 % de las estaciones a prueba, elegidas entre las que tienen datos desde 1998; el resto queda en entrenamiento.
+   - **Sorteo por píxel CHIRPS:** las estaciones que comparten píxel ven la misma curva del satélite, así que se sortean juntas. Dentro de cada tercil de altitud, 15 % de los píxeles a prueba, elegidos entre los que tienen datos desde 1998; el resto queda en entrenamiento. Ningún píxel queda repartido entre entrenamiento y prueba.
    - **Años de cada grupo:** entrenamiento 1981–1997 y prueba 1998–2003, que incluye La Niña de 1998–2001 y El Niño de 2002–2003.
-   - **Validación cruzada:** las estaciones de entrenamiento con datos hasta 1997 se reparten en 5 grupos dentro de cada tercil de altitud; cada estación queda en un solo grupo (`01_particion_estaciones.csv`, columna `grupo_vc`). La regresión funcional y la red usan los mismos grupos.
+   - **Validación cruzada:** los píxeles de entrenamiento con datos hasta 1997 se reparten en 5 grupos dentro de cada tercil de altitud; cada píxel, con todas sus estaciones, queda en un solo grupo (`01_particion_estaciones.csv`, columna `grupo_vc`). La regresión funcional y la red usan los mismos grupos.
    - **Quedan fuera del modelo:** las estaciones sin coordenadas o sin altitud. Sí se usan en el EDA y en las comparaciones.
 3. **Preprocesamiento:**
    - errores aislados de más de 400 mm;
    - totales mensuales registrados en un solo día;
-   - imputación de días faltantes por IDW con las K estaciones de entrenamiento más cercanas (K elegido en cada zona por validación cruzada dejando una estación fuera, `01_preprocesamiento_imputacion_seleccion_K.csv`) que tienen dato ese día (peso 1/distancia, distancia euclidiana con las coordenadas), solo en estación-año con menos del 20 % de días faltantes; las vecinas son de la misma zona, valle (hasta 1239 m) o montaña, como en Russi y Larrahondo (2017) (`01_preprocesamiento_imputacion.csv`);
+   - imputación de días faltantes por IDW con las K estaciones de entrenamiento más cercanas que tienen dato ese día (peso 1/distancia, distancia euclidiana con las coordenadas), solo en estación-año con menos del 20 % de días faltantes; las vecinas son de la misma zona, valle (hasta 1239 m) o montaña, como en Russi y Larrahondo (2017). K se elige en cada zona por validación cruzada dejando una estación fuera, solo con las estaciones de entrenamiento y los días de 1981–1997 (`01_preprocesamiento_imputacion_seleccion_K.csv`), y ese K se aplica a todas las estaciones. La estación de la costa (planicie del Pacífico) no se imputa ni sirve de vecina (`01_preprocesamiento_imputacion.csv`);
    - cobertura mínima por estación y año (95 % de los días, huecos y bordes de máximo 7 días), después de imputar.
 
    Las reglas se revisan solo con estaciones de entrenamiento y se aplican a todos los datos. La trazabilidad queda en `01_preprocesamiento_trazabilidad.csv`.
@@ -189,6 +191,7 @@ Todo está en `data/`:
 | `02_Ablacion_arquitectura.ipynb` | Ablación con validación cruzada de 5 grupos de estaciones de entrenamiento: q y M, capas e intervalos de la KAN y forma del ONI; diagnóstico del mejor modelo. No usa la prueba. |
 | `03_Ablacion_cabezas.ipynb` | Lineal, MLP y KAN con las predicciones de validación cruzada del notebook 01: métricas, climatología, desfase de los picos y bootstrap por estaciones (2000 remuestreos).  |
 | `Evaluacion_interpretacion.ipynb` | Evaluación final en prueba contra la curva suavizada de la estación: L² relativo, KGE, sesgo anual y error de la fecha de los dos picos, con IC bootstrap por estaciones; resultados por fase ENSO; w_k(t), activaciones de la KAN, contraste con la cabeza lineal, ajuste simbólico y peores casos; CSV de las estaciones de prueba. |
+| `05_Diagnostico_atenuacion_KAN.ipynb` | Atenuación de la KAN con las predicciones de validación cruzada: techo de la FPCA, puntajes FPCA y picos frente al oráculo. Variantes de la KAN (L1, L1 con entropía, poda con reajuste y su control, armónicos del satélite) comparadas con la validación cruzada de 5 grupos. No usa la prueba. |
 
 
 ## Parte 6 - Predicciones de las estaciones de prueba

@@ -137,40 +137,53 @@ valle <- departamentos_col[departamentos_col$NAME_1 == "Valle del Cauca", ]
 
 #################### Particion por estaciones ####################
 # Entrenamiento 1981-1997 y prueba 1998-2003
-# Se reserva el 15 % de estaciones para prueba
+# se asegura que las estaciones del mismo pixel queden en la misma particion
 estaciones_particion <- info_estaciones[info_estaciones$STATION_ID %in% p_tierra$STATION_ID &
   !is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
-  !is.na(info_estaciones$altitud_completa), c("STATION_ID", "altitud_completa")]
+  !is.na(info_estaciones$altitud_completa), c("STATION_ID", "longitud", "latitud", "altitud_completa")]
 estaciones_particion$STATION_ID <- as.character(estaciones_particion$STATION_ID)
-estaciones_particion$tercil_altitud <- cut(estaciones_particion$altitud_completa,
-  quantile(estaciones_particion$altitud_completa, c(0, 1/3, 2/3, 1)),
+raster_pixel <- rast(list.files("data/ImagenesSatelitePentadal", pattern = "ppt.*\\.tif$", full.names = TRUE)[1])
+estaciones_particion$pixel <- cellFromXY(raster_pixel, as.matrix(estaciones_particion[, c("longitud", "latitud")]))
+
+estaciones_particion$bloque <- ifelse(is.na(estaciones_particion$pixel), paste0("estacion_", estaciones_particion$STATION_ID),
+                                      paste0("pixel_", estaciones_particion$pixel))
+cortes_altitud <- quantile(estaciones_particion$altitud_completa, c(0, 1/3, 2/3, 1))
+estaciones_particion$tercil_altitud <- cut(estaciones_particion$altitud_completa, cortes_altitud,
   labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
-# Las candidatas a prueba son las estaciones con datos desde 1998
-con_prueba <- estaciones_particion$STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR >= 1998])
+
+bloques <- estaciones_particion %>%
+  group_by(bloque) %>%
+  summarize(altitud = median(altitud_completa),
+            con_prueba = any(STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR >= 1998])),
+            con_entrenamiento = any(STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR <= 1997])),
+            .groups = "drop")
+bloques$tercil_altitud <- cut(bloques$altitud, cortes_altitud, labels = c("Baja", "Media", "Alta"), include.lowest = TRUE)
+
 set.seed(2026)
-estaciones_particion$particion <- "entrenamiento"
-for (tercil in levels(estaciones_particion$tercil_altitud)) {
-  en_tercil <- !is.na(estaciones_particion$tercil_altitud) &
-    estaciones_particion$tercil_altitud == tercil
-  candidatas <- which(en_tercil & con_prueba)
+bloques$particion <- "entrenamiento"
+for (tercil in levels(bloques$tercil_altitud)) {
+  en_tercil <- bloques$tercil_altitud == tercil
+  candidatas <- which(en_tercil & bloques$con_prueba)
   n_reservadas <- min(length(candidatas), round(0.15 * sum(en_tercil)))
-  if (n_reservadas > 0) {
-    elegidas <- sample(candidatas, n_reservadas)
-    estaciones_particion$particion[elegidas] <- "prueba"
-  }
+  if (n_reservadas > 0) bloques$particion[sample(candidatas, n_reservadas)] <- "prueba"
 }
+bloques$grupo_vc <- NA
+for (tercil in levels(bloques$tercil_altitud)) {
+  filas <- which(bloques$tercil_altitud == tercil & bloques$particion == "entrenamiento" & bloques$con_entrenamiento)
+  bloques$grupo_vc[filas] <- sample(rep(1:5, length.out = length(filas)))
+}
+table(bloques$tercil_altitud, bloques$particion)
+table(bloques$tercil_altitud, bloques$grupo_vc)
+
+estaciones_particion$particion <- bloques$particion[match(estaciones_particion$bloque, bloques$bloque)]
+con_entrenamiento <- estaciones_particion$STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR <= 1997])
+estaciones_particion$grupo_vc <- ifelse(con_entrenamiento,
+                                        bloques$grupo_vc[match(estaciones_particion$bloque, bloques$bloque)], NA)
 table(estaciones_particion$tercil_altitud, estaciones_particion$particion)
 
-# Validacion cruzada: 5 grupos con las estaciones de entrenamiento que tienen datos hasta 1997
-# Se reparten dentro de cada tercil de altitud; una estacion queda en un solo grupo
-con_entrenamiento <- estaciones_particion$STATION_ID %in% as.character(p_tierra$STATION_ID[p_tierra$YEAR <= 1997])
-estaciones_particion$grupo_vc <- NA
-for (tercil in levels(estaciones_particion$tercil_altitud)) {
-  filas <- which(estaciones_particion$tercil_altitud == tercil & estaciones_particion$particion == "entrenamiento" &
-                   con_entrenamiento)
-  estaciones_particion$grupo_vc[filas] <- sample(rep(1:5, length.out = length(filas)))
-}
-table(estaciones_particion$tercil_altitud, estaciones_particion$grupo_vc)
+con_pixel <- estaciones_particion[!is.na(estaciones_particion$pixel), ]
+stopifnot(all(tapply(con_pixel$particion, con_pixel$pixel, function(x) length(unique(x))) == 1),
+          all(tapply(con_pixel$grupo_vc, con_pixel$pixel, function(x) length(unique(na.omit(x))) <= 1)))
 grupo_vc <- function(estacion) {
   estaciones_particion$grupo_vc[match(as.character(estacion), estaciones_particion$STATION_ID)]
 }
@@ -359,6 +372,15 @@ LIMITE_VALLE <- 1239
 info_imp <- info_estaciones[!is.na(info_estaciones$longitud) & !is.na(info_estaciones$latitud) &
                               !is.na(info_estaciones$altitud_completa), ]
 info_imp$zona_imputacion <- ifelse(info_imp$altitud_completa <= LIMITE_VALLE, "Valle", "Montaña")
+puntos_imp <- vect(info_imp[, c("STATION_ID", "longitud", "latitud")], geom = c("longitud", "latitud"), crs = "EPSG:4326")
+paisajes_imp <- vect("data/Paisajes_IGAC_hidrografia_IDEAM.gpkg", layer = "paisajes_IGAC")
+hidrografia_imp <- vect("data/Paisajes_IGAC_hidrografia_IDEAM.gpkg", layer = "hidrografia_IDEAM")
+paisaje_punto_imp <- terra::extract(paisajes_imp, project(puntos_imp, crs(paisajes_imp)))
+cuenca_punto_imp <- terra::extract(hidrografia_imp, project(puntos_imp, crs(hidrografia_imp)))
+stopifnot(identical(as.integer(paisaje_punto_imp$id.y), seq_len(nrow(info_imp))),
+          identical(as.integer(cuenca_punto_imp$id.y), seq_len(nrow(info_imp))))
+info_imp$zona_imputacion[grepl("^Planicie", paisaje_punto_imp$PAISAJE) & cuenca_punto_imp$nom_ah %in% "Pacifico"] <- "Costa"
+table(info_imp$zona_imputacion)
 lat0 <- mean(info_imp$latitud)
 info_imp$x <- info_imp$longitud * 111.32 * cos(lat0 * pi / 180)
 info_imp$y <- info_imp$latitud * 110.57
@@ -372,7 +394,8 @@ ancho <- calendario %>%
   dplyr::select(STATION_ID, fecha, VALUE) %>%
   pivot_wider(names_from = STATION_ID, values_from = VALUE) %>%
   arrange(fecha)
-donantes <- intersect(as.character(info_imp$STATION_ID[es_entrenamiento(info_imp$STATION_ID)]), names(ancho))
+donantes <- intersect(as.character(info_imp$STATION_ID[es_entrenamiento(info_imp$STATION_ID) &
+                                                         info_imp$zona_imputacion != "Costa"]), names(ancho))
 zona_donante <- info_imp$zona_imputacion[match(donantes, info_imp$STATION_ID)]
 
 # Estimacion IDW de todos los dias de una estacion para cada K de la lista (peso 1 / distancia)
@@ -401,14 +424,15 @@ estimar_idw <- function(s, K_lista) {
   estimado
 }
 
-# Eleccion de K por validacion cruzada: cada dia con dato de cada estacion de entrenamiento se estima con sus
-# vecinas (sin ella misma) y se compara con el valor registrado; todos los K se miden en los mismos dias
+# Eleccion de K por validacion cruzada
+# El K elegido se aplica a las de prueba
 K_lista <- c(1, 3, 5, 7, 10, 15, 20, 25, 30)
+dias_entrenamiento <- as.numeric(format(ancho$fecha, "%Y")) <= 1997
 errores_K <- data.frame()
 for (s in donantes) {
   observado <- ancho[[s]]
   estimado <- estimar_idw(s, K_lista)
-  usar <- !is.na(observado) & rowSums(is.na(estimado)) == 0
+  usar <- dias_entrenamiento & !is.na(observado) & rowSums(is.na(estimado)) == 0
   errores_K <- rbind(errores_K, data.frame(
     zona = info_imp$zona_imputacion[match(s, info_imp$STATION_ID)], K = K_lista,
     suma_error2 = colSums((estimado[usar, , drop = FALSE] - observado[usar])^2, na.rm = TRUE),
@@ -431,7 +455,8 @@ guardar_figura("01_preprocesamiento_imputacion_seleccion_K.png", 7, 5)
 
 # Imputacion con el K elegido en cada zona
 calendario$imputado <- FALSE
-for (s in intersect(as.character(unique(imputables$STATION_ID)), as.character(info_imp$STATION_ID))) {
+sin_costa <- as.character(info_imp$STATION_ID[info_imp$zona_imputacion != "Costa"])
+for (s in intersect(as.character(unique(imputables$STATION_ID)), sin_costa)) {
   K_s <- K_zona$K[K_zona$zona == info_imp$zona_imputacion[match(s, info_imp$STATION_ID)]]
   estimado <- estimar_idw(s, K_s)[, 1]
   anios <- imputables$YEAR[as.character(imputables$STATION_ID) == s]
@@ -624,9 +649,12 @@ for (i in which(curvas$estado == "Emparejado")) {
 table(curvas$estado)
 guardar_tabla(as.data.frame(table(estado = curvas$estado)), "03_emparejamiento_estado_curvas.csv")
 
-# Estaciones que comparten pixel
 table(estaciones$pixel)[table(estaciones$pixel) > 1]
-pixeles_compartidos <- estaciones[estaciones$pixel %in% estaciones$pixel[duplicated(estaciones$pixel)], ]
+en_raster <- estaciones[!is.na(estaciones$pixel), ]
+pixeles_compartidos <- en_raster[en_raster$pixel %in% en_raster$pixel[duplicated(en_raster$pixel)], ]
+pixeles_compartidos$particion <- estaciones_particion$particion[match(pixeles_compartidos$STATION_ID,
+                                                                      estaciones_particion$STATION_ID)]
+pixeles_compartidos$grupo_vc <- grupo_vc(pixeles_compartidos$STATION_ID)
 pixeles_compartidos <- pixeles_compartidos[order(pixeles_compartidos$pixel), ]
 guardar_tabla(pixeles_compartidos, "03_emparejamiento_pixeles_compartidos.csv")
 
