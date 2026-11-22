@@ -3401,7 +3401,55 @@ sensibilidad_enso_cohortes
 guardar_tabla(sensibilidad_enso_cohortes, "06_comparacion_ENSO_cohortes_autocorrelacion.csv")
 # El corrimiento del sesgo entre El Niño y La Niña se conserva al excluir el Pacífico (<700 m) y en la cohorte balanceada de 59 píxeles
 # con los 23 años completos (F_n entre 2,98 y 3,36; p <= 0,0030), y la autocorrelación interanual lag-1 de la media anual es baja (0,061 a 0,116)
+# COMPARACION FUNCIONAL ANUAL TABLAS Y FIGURAS IMPORTANTES (1981-2003)
+anios<-sort(unique(metadatos_comparacion$YEAR));tt<-pentadas_eda;pisos<-niveles_pisos_4
+cols_pisos<-c("Pacífico bajo (<700 m)"="steelblue4","Valle (700-1239 m)"="darkgreen","Montaña media (1240-2000 m)"="darkorange2","Alta montaña (>2000 m)"="firebrick");cols_enso<-c("El Niño"="firebrick","Neutral"="grey40","La Niña"="steelblue")
+guardar<-function(x,n)write.csv(x,paste0(n,".csv"),row.names=FALSE)
+abrir<-function(n,mf=c(5,5),mar=c(3,3.2,2.5,.7),oma=c(2.8,2.2,1.3,.5)){par(mfrow=mf,mar=mar,oma=oma,cex.axis=1.15,cex.main=1.35,cex.lab=1.2)}
+cerrar<-function(xlab="Péntada"){mtext(xlab,side=1,outer=TRUE,line=.6,cex=1.35)}
+panel<-function(i){if(i>length(anios)){plot.new();return(FALSE)};TRUE}
+datos<-lapply(anios,function(a){i<-which(metadatos_comparacion$YEAR==a);list(E=valores_comparacion$terrestre[,i,drop=FALSE],S=valores_comparacion$satelital[,i,drop=FALSE],D=diferencia_comparacion[,i,drop=FALSE],meta=metadatos_comparacion[i,,drop=FALSE])});names(datos)<-as.character(anios)
 
+# EMPAREJAMIENTO ESTACION-PIXEL
+emp<-estaciones_zonas[,c("STATION_ID","pixel","longitud","latitud","altitud_m","piso_altitudinal")];emp$estaciones_en_pixel<-as.integer(table(emp$pixel)[as.character(emp$pixel)])
+guardar(emp,"01_emparejamiento_estacion_pixel");guardar(emp[emp$estaciones_en_pixel>1,],"01_pixeles_compartidos")
+res_emp<-data.frame(estaciones=nrow(emp),pixeles_unicos=length(unique(emp$pixel)),pixeles_compartidos=length(unique(emp$pixel[emp$estaciones_en_pixel>1])),estaciones_en_pixeles_compartidos=sum(emp$estaciones_en_pixel>1));guardar(res_emp,"01_resumen_emparejamiento")
+cat("Emparejamiento:",nrow(emp),"estaciones,",length(unique(emp$pixel)),"pixeles\n")
+
+# DIFERENCIA FUNCIONAL ANUAL Y BANDA +/-2EE
+bandas<-do.call(rbind,lapply(seq_along(anios),function(i){D<-datos[[i]]$D;n<-ncol(D);m<-rowMeans(D);ee<-apply(D,1,sd)/sqrt(n);data.frame(anio=anios[i],pentada=tt,pixeles=n,d=m,EE=ee,LI=m-2*ee,LS=m+2*ee,excluye_cero=(m-2*ee>0)|(m+2*ee<0))}))
+guardar(bandas,"02_diferencia_bandas_anuales");lim<-range(bandas[,c("LI","LS")],0,na.rm=TRUE)
+abrir("02_diferencias_23_anios")
+for(i in 1:25){if(!panel(i))next;b<-bandas[bandas$anio==anios[i],];plot(tt,b$d,type="n",ylim=lim,main=paste0(anios[i]," (P=",b$pixeles[1],")"),xlab="",ylab="");polygon(c(tt,rev(tt)),c(b$LI,rev(b$LS)),col=adjustcolor("steelblue",alpha.f=.2),border=NA);lines(tt,b$d,col="navy",lwd=1.8);lines(tt,b$LI,col="steelblue",lty=2);lines(tt,b$LS,col="steelblue",lty=2);abline(h=0,col="red",lty=3);if(i==1)legend("topright",c("d(t)=estación-satélite","Banda ±2EE","Cero"),col=c("navy","steelblue","red"),lty=c(1,2,3),lwd=c(1.8,1,1),bty="n",cex=.9)}
+cerrar()
+intervalos<-do.call(rbind,lapply(split(bandas,bandas$anio),function(b){r<-rle(b$excluye_cero);f<-cumsum(r$lengths);ini<-f-r$lengths+1;if(!any(r$values))return(NULL);data.frame(anio=b$anio[1],inicio=b$pentada[ini[r$values]],fin=b$pentada[f[r$values]],signo=ifelse(b$d[ini[r$values]]>0,"Positivo: estación>satélite","Negativo: satélite>estación"))}))
+guardar(intervalos,"02_intervalos_fuera_cero")
+
+# CORRELACION CRUZADA FUNCIONAL Y SU DIAGONAL
+corES<-lapply(datos,function(z)cor(t(z$E),t(z$S)));diagES<-sapply(corES,diag);Cmed<-apply(simplify2array(corES),c(1,2),median,na.rm=TRUE);Dmed<-apply(diagES,1,median,na.rm=TRUE)
+tabla_cor<-data.frame(anio=anios,correlacion_media=round(colMeans(diagES),3),correlacion_min=round(apply(diagES,2,min),3),correlacion_max=round(apply(diagES,2,max),3));guardar(tabla_cor,"03_correlacion_anual_resumen")
+pal<-colorRampPalette(c("blue3","white","red3"))(100);par(mfrow=c(1,2),mar=c(5,5,3.7,1.4),oma=c(0,0,1,0),cex.axis=1.3,cex.lab=1.4,cex.main=1.45)
+image(tt,tt,Cmed,zlim=c(-1,1),col=pal,xlab="Péntada satélite",ylab="Péntada estación",main="Correlación cruzada\nMediana de 23 años",useRaster=TRUE);contour(tt,tt,Cmed,levels=seq(-1,1,.2),add=TRUE,drawlabels=TRUE,col="black",lwd=.8,labcex=1);abline(0,1,lty=3,col="black");legend("bottomleft",legend=c("Azul: negativa","Blanco: cercana a 0","Rojo: positiva"),fill=c("blue3","white","red3"),bty="n",cex=1)
+matplot(tt,diagES,type="l",lty=1,col=adjustcolor("steelblue",alpha.f=.25),ylim=c(-1,1),xlab="Péntada",ylab="Correlación",main="Diagonales anuales (1981-2003)");lines(tt,Dmed,col="navy",lwd=3);abline(h=0,lty=3);legend("bottomleft",c("23 años","Mediana anual"),col=c("steelblue","navy"),lwd=c(1,3),bty="n",cex=1.1)
+
+# TABLA DE COVARIANZA POR FUENTE (SIN GRAFICAS)
+covE<-lapply(datos,function(z)cov(t(z$E)));covS<-lapply(datos,function(z)cov(t(z$S)))
+tabla_cov<-data.frame(anio=anios,pixeles=sapply(datos,function(z)ncol(z$D)),var_est=round(sapply(covE,function(M)mean(diag(M))),2),var_sat=round(sapply(covS,function(M)mean(diag(M))),2),cov_est_consec=round(sapply(covE,function(M)mean(M[cbind(1:(nrow(M)-1),2:nrow(M))])),2),cov_sat_consec=round(sapply(covS,function(M)mean(M[cbind(1:(nrow(M)-1),2:nrow(M))])),2))
+tabla_cov$razon_var_est_sat<-round(tabla_cov$var_est/tabla_cov$var_sat,2);guardar(tabla_cov,"04_tabla_covarianza_anual")
+cat("\nTABLA DE COVARIANZA ANUAL\n");print(tabla_cov,row.names=FALSE);cat("\nAños con varianza de estaciones mayor que satélite:",sum(tabla_cov$var_est>tabla_cov$var_sat),"/",nrow(tabla_cov),"\n")
+
+# COMPARACION POR ALTITUD DENTRO DE CADA ANO
+alt<-do.call(rbind,lapply(seq_along(anios),function(i){z<-datos[[i]];g<-factor(metadatos_pixeles$piso_altitudinal[match(z$meta$pixel,metadatos_pixeles$pixel)],levels=pisos);do.call(rbind,lapply(pisos,function(p){j<-which(g==p);data.frame(anio=anios[i],piso=p,pixeles=length(j),pentada=tt,d=if(length(j))rowMeans(z$D[,j,drop=FALSE]) else NA_real_)}))}))
+guardar(alt,"05_sesgo_pisos_por_anio");res_alt<-aggregate(d~anio+piso,alt,mean);res_alt$pixeles<-mapply(function(a,p)unique(alt$pixeles[alt$anio==a & alt$piso==p]),res_alt$anio,res_alt$piso);guardar(res_alt,"05_resumen_anual_altitud")
+abrir("05_altitud_23_anios")
+for(i in 1:25){if(i==24){plot.new();plot.window(xlim=c(0,1),ylim=c(0,1));legend(x=.02,y=.88,legend=pisos,col=cols_pisos[pisos],lty=1,lwd=2,bty="n",cex=1.05,xjust=0,yjust=1,xpd=FALSE,seg.len=1.5);next};if(!panel(i))next;z<-alt[alt$anio==anios[i],];mat<-sapply(pisos,function(p)z$d[z$piso==p]);matplot(tt,mat,type="l",lty=1,col=cols_pisos[pisos],lwd=1.8,main=anios[i],xlab="",ylab="",ylim=range(alt$d,0,na.rm=TRUE));abline(h=0,lty=3)}
+cerrar()
+
+# ENSO: CURVA ANUAL COLOREADA POR FASE MENSUAL
+enso_tab<-data.frame(anio=rep(anios,each=72),pentada=rep(tiempos,length(anios)),fase=as.vector(fase_pentada_enso),d=as.vector(D_red_enso));guardar(enso_tab,"06_ENSO_anual_pentadas");lim_enso<-range(D_red_enso,0,finite=TRUE)
+abrir("06_ENSO_23_anios")
+for(i in 1:25){if(i==24){plot.new();plot.window(xlim=c(0,1),ylim=c(0,1));legend(x=.05,y=.85,legend=names(cols_enso),col=cols_enso,lty=1,lwd=2,bty="n",cex=1.35,xjust=0,yjust=1,xpd=FALSE,seg.len=2);next};if(!panel(i))next;z<-enso_tab[enso_tab$anio==anios[i],];plot(z$pentada,z$d,type="n",ylim=lim_enso,main=anios[i],xlab="",ylab="");segments(head(z$pentada,-1),head(z$d,-1),tail(z$pentada,-1),tail(z$d,-1),col=cols_enso[head(z$fase,-1)],lwd=2);points(z$pentada,z$d,col=cols_enso[z$fase],pch=16,cex=.4);abline(h=0,lty=3)}
+cerrar()
 
 #################### Regresion funcional ####################
 particion_completa <- particion_curva(metadatos_completos$STATION_ID, metadatos_completos$YEAR)
