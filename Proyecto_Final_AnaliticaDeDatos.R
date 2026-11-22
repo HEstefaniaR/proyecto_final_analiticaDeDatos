@@ -232,9 +232,13 @@ guardar_figura("01_preprocesamiento_histograma_diaria.png", 7, 5)
 casos <- unique(mayores_300[, c("STATION_ID", "YEAR")])
 casos <- casos[order(casos$YEAR, casos$STATION_ID), ]
 
-# Una imagen cada 6 casos
-png("Figuras/01_preprocesamiento_casos_mayores_300mm_%02d.png", width = 12, height = 7, units = "in", res = 150)
-par(mfrow = c(2, 3))
+# Una imagen cada 6 casos (ajustando filas y columnas al numero real de casos)
+n_casos_300 <- nrow(casos)
+cols_300 <- min(n_casos_300, 3)
+filas_300 <- min(2, ceiling(n_casos_300 / 3))
+png("Figuras/01_preprocesamiento_casos_mayores_300mm_%02d.png",
+    width = 4 * cols_300, height = 3.8 * filas_300, units = "in", res = 150)
+par(mfrow = c(filas_300, cols_300))
 for (i in 1:nrow(casos)) {
   d <- p_revision[p_revision$STATION_ID == casos$STATION_ID[i] & p_revision$YEAR == casos$YEAR[i], ]
   plot(d$fecha, d$VALUE, type = "b", pch = 16, cex = 0.4, lwd = 0.5, col = "steelblue",
@@ -261,9 +265,11 @@ errores_aislados
 guardar_tabla(errores_aislados, "01_preprocesamiento_errores_aislados.csv")
 
 # Grafico valores altos de precipitacion
-png("Figuras/01_errores_aislados_anio_completo.png", width = 10, height = 3 * nrow(errores_aislados),
+cols_err <- min(nrow(errores_aislados), 3)
+filas_err <- ceiling(nrow(errores_aislados) / cols_err)
+png("Figuras/01_errores_aislados_anio_completo.png", width = 4 * cols_err, height = 3.6 * filas_err,
     units = "in", res = 150)
-par(mfrow = c(nrow(errores_aislados), 1), mar = c(4, 4, 3, 1))
+par(mfrow = c(filas_err, cols_err), mar = c(4, 4, 3, 1))
 for (i in seq_len(nrow(errores_aislados))) {
   s <- errores_aislados$STATION_ID[i]
   f <- p_tierra$fecha[error[i]]
@@ -275,14 +281,16 @@ for (i in seq_len(nrow(errores_aislados))) {
   ymax <- max(c(y_resto, 50), na.rm = TRUE) * 1.2
   
   plot(datos$fecha, ifelse(datos$fecha == f, NA, datos$VALUE), type = "h",
-       ylim = c(0, ymax), xlab = "Fecha", ylab = "Precipitacion (mm)",
-       main = paste0("Estacion ", s, " - año ", anio))
+       ylim = c(0, ymax), xlab = "Fecha", ylab = "Precipitación (mm)",
+       main = paste0("Estación ", s, " - año ", anio))
   points(f, ymax, pch = 17, col = "red", cex = 1.5)
-  text(f, ymax, labels = paste(format(f, "%d-%m"), ":", valor_error, "mm"), pos = 1, col = "red", cex = 0.8)
+  rango_f <- range(datos$fecha, na.rm = TRUE)
+  frac_f <- as.numeric(f - rango_f[1]) / max(1, as.numeric(rango_f[2] - rango_f[1]))
+  pos_txt <- if (frac_f < 0.2) 4 else if (frac_f > 0.8) 2 else 1
+  text(f, ymax, labels = paste(format(f, "%d-%m"), ":", valor_error, "mm"), pos = pos_txt, col = "red", cex = 0.8)
 }
 dev.off()
 par(mfrow = c(1, 1))
-guardar_figura("01_errores_aislados_anio_completo.png", 10, 3 * nrow(errores_aislados))
 
 p_tierra$VALUE[error] <- NA
 
@@ -505,19 +513,17 @@ guardar_tabla(umbrales_cobertura, "01_preprocesamiento_umbrales_cobertura.csv")
 # Criterio: 95 % de cobertura y huecos de maximo 7 dias
 cobertura$apto <- cobertura$cobertura >= 0.95 & cobertura$hueco <= 7 & cobertura$borde <= 7
 
-trazabilidad_pasos <- rbind(trazabilidad_pasos, 
-                            contar(p_m_depurado[paste(p_m_depurado$STATION_ID, 
-                                                      p_m_depurado$YEAR) %in% 
-                                                  paste(cobertura$STATION_ID, cobertura$YEAR)[cobertura$apto], ], "Cobertura minima"))
+# Datos diarios de los pares aptos
+pares_aptos <- paste(cobertura$STATION_ID, cobertura$YEAR)[cobertura$apto]
+datos_tierra <- calendario[paste(calendario$STATION_ID, calendario$YEAR) %in% pares_aptos, ]
+
+trazabilidad_pasos <- rbind(trazabilidad_pasos, contar(datos_tierra, "Cobertura minima"))
 
 cat("Pares estacion-año antes:", nrow(cobertura), "| aptos:", sum(cobertura$apto), "\n")
 cat("Estaciones antes:", length(unique(cobertura$STATION_ID)),
     "| despues:", length(unique(cobertura$STATION_ID[cobertura$apto])), "\n")
 
 # Pentadas de las estaciones
-# Datos diarios de los pares aptos
-pares_aptos <- paste(cobertura$STATION_ID, cobertura$YEAR)[cobertura$apto]
-datos_tierra <- calendario[paste(calendario$STATION_ID, calendario$YEAR) %in% pares_aptos, ]
 
 datos_tierra$MONTH <- as.numeric(format(datos_tierra$fecha, "%m"))
 datos_tierra$DAY <- as.numeric(format(datos_tierra$fecha, "%d"))
