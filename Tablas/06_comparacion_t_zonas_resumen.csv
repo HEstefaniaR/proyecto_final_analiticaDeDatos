@@ -1,0 +1,2 @@
+"grupo","n_valle","n_montana","media_valle_mm","media_montana_mm","diferencia_media_mm","DE_media_valle_mm","DE_media_montana_mm","pentada_pico","diferencia_pico_mm","EE_welch_pico_mm","T_welch_max","c_maximo","p_global","puntos_sig_maximo","puntos_sig_puntual"
+"Valle - Montaña",69,78,-0.0203171950259615,0.229974961475906,-0.250292156501867,15.1570769109055,9.38283338581448,11,-2.51060817699373,1.52538874053387,1.64588088942825,2.3730085408986,0.264147170565887,0,0
