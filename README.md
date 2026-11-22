@@ -74,7 +74,6 @@ proyecto_final_analiticaDeDatos/
 ├── 02_Ablacion_arquitectura.ipynb      
 ├── 03_Ablacion_cabezas.ipynb           
 ├── 04_Evaluacion_interpretacion.ipynb   
-├── 05_Diagnostico_atenuacion_KAN.ipynb # Atenuación de la KAN y variantes con L1, entropía, poda y armónicos
 ├── data/                               # Datos crudos (estaciones, catálogos, CHIRPS, ONI, cartografía)
 ├── Curvas/                             # Curvas exportadas (coeficientes, bases, metadatos)
 ├── Resultados_Modelos1/                # Pesos de las tres cabezas × 3 semillas
@@ -194,7 +193,6 @@ Todo está en `data/`:
 | `02_Ablacion_arquitectura.ipynb` | Ablación con validación cruzada de 5 grupos de estaciones de entrenamiento: q y M, capas e intervalos de la KAN y forma del ONI; diagnóstico del mejor modelo. No usa la prueba. |
 | `03_Ablacion_cabezas.ipynb` | Lineal, MLP y KAN con las predicciones de validación cruzada del notebook 01: métricas, climatología, desfase de los picos y bootstrap por estaciones (2000 remuestreos).  |
 | `Evaluacion_interpretacion.ipynb` | Evaluación final en prueba contra la curva suavizada de la estación: L² relativo, KGE, sesgo anual y error de la fecha de los dos picos, con IC bootstrap por estaciones; resultados por fase ENSO; w_k(t), activaciones de la KAN, contraste con la cabeza lineal, ajuste simbólico y peores casos; CSV de las estaciones de prueba. |
-| `05_Diagnostico_atenuacion_KAN.ipynb` | Atenuación de la KAN con las predicciones de validación cruzada: techo de la FPCA, puntajes FPCA y picos frente al oráculo. Variantes de la KAN (L1, L1 con entropía, poda con reajuste y su control, armónicos del satélite) comparadas con la validación cruzada de 5 grupos. No usa la prueba. |
 
 
 ## Parte 6 - Predicciones de las estaciones de prueba
